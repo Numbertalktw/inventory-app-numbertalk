@@ -56,8 +56,7 @@ PREFIX_MAP = {
 
 def filter_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """
-    通用篩選器 UI 元件
-    讓使用者可以針對 DataFrame 的任意欄位進行篩選
+    通用篩選器 UI 元件 (含全選功能)
     """
     modify = st.checkbox("🔍 開啟資料篩選器 (Filter Data)")
 
@@ -66,7 +65,7 @@ def filter_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
     df = df.copy()
 
-    # 嘗試轉換日期欄位格式以便篩選
+    # 嘗試轉換日期欄位格式
     for col in df.columns:
         if is_object_dtype(df[col]):
             try:
@@ -84,17 +83,36 @@ def filter_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             left.write("↳")
             
             # 處理各種資料類型的篩選邏輯
-            if is_categorical_dtype(df[column]) or df[column].nunique() < 20:
-                # 如果選項少，用多選選單
-                user_cat_input = right.multiselect(
-                    f"選擇 {column} 的內容",
-                    df[column].unique(),
-                    default=list(df[column].unique()),
-                )
-                df = df[df[column].isin(user_cat_input)]
+            # 1. 選項類 (文字/分類)
+            if is_categorical_dtype(df[column]) or df[column].nunique() < 30: # 增加閾值以涵蓋更多分類
+                options = sorted(df[column].astype(str).unique().tolist())
                 
+                # ★★★ 新增：全選功能 ★★★
+                # 預設勾選全選，讓使用者一開始看到所有資料
+                use_all = right.checkbox(f"全選 (Select All) - {column}", value=True, key=f"chk_{column}")
+                
+                if use_all:
+                    # 如果全選，不進行過濾 (顯示全部)
+                    user_cat_input = options
+                    right.caption(f"✅ 已顯示所有內容 ({len(options)} 項)")
+                else:
+                    # 如果取消全選，顯示多選選單
+                    user_cat_input = right.multiselect(
+                        f"請選擇 {column} 的內容",
+                        options,
+                        default=[] # 預設空，方便使用者只挑選幾個
+                    )
+                
+                # 執行篩選
+                if user_cat_input:
+                    df = df[df[column].astype(str).isin(user_cat_input)]
+                else:
+                    # 如果沒全選也沒選項目，顯示空 (避免誤會)
+                    if not use_all:
+                        df = df[df[column].astype(str).isin([])]
+                
+            # 2. 數字類
             elif is_numeric_dtype(df[column]):
-                # 如果是數字，用範圍滑桿
                 _min = float(df[column].min())
                 _max = float(df[column].max())
                 step = (_max - _min) / 100
@@ -107,8 +125,8 @@ def filter_dataframe(df: pd.DataFrame) -> pd.DataFrame:
                 )
                 df = df[df[column].between(*user_num_input)]
                 
+            # 3. 日期類
             elif is_datetime64_any_dtype(df[column]):
-                # 如果是日期，用日期選擇器
                 user_date_input = right.date_input(
                     f"選擇 {column} 的範圍",
                     value=(
@@ -122,8 +140,8 @@ def filter_dataframe(df: pd.DataFrame) -> pd.DataFrame:
                     df = df.loc[df[column] >= start_date]
                     df = df.loc[df[column] <= end_date]
                     
+            # 4. 其他文字 (搜尋)
             else:
-                # 其他文字，用關鍵字搜尋
                 user_text_input = right.text_input(
                     f"搜尋 {column} 包含的字串",
                 )
@@ -526,7 +544,7 @@ if page == "📦 商品建檔與維護":
         st.info("此處可直接修改品名、分類或系列。修改後請務必按下「儲存修改」按鈕。")
         df_safe = get_safe_view(st.session_state['inventory'])
         
-        # ★★★ 加入篩選功能 ★★★
+        # ★★★ 加入篩選器 ★★★
         df_safe = filter_dataframe(df_safe)
         
         edited_products = st.data_editor(
@@ -653,7 +671,7 @@ elif page == "📥 進貨庫存 (無金額)":
         purchase_cols = ['單號', '日期', '廠商', '系列', '分類', '品名', '貨號', '批號', '倉庫', '數量', 'Key單者', '備註']
         valid_cols = [c for c in purchase_cols if c in df_view.columns]
         
-        # ★★★ 加入篩選功能 ★★★
+        # ★★★ 加入篩選器 ★★★
         st.write("---")
         df_filtered = filter_dataframe(df_view[valid_cols])
         st.dataframe(df_filtered, use_container_width=True)
@@ -727,7 +745,7 @@ elif page == "🔨 製造生產 (工廠)":
         mask = df['單據類型'].astype(str).str.contains('製造')
         df_view = get_safe_view(df[mask])
         
-        # ★★★ 加入篩選功能 ★★★
+        # ★★★ 加入篩選器 ★★★
         st.write("---")
         df_filtered = filter_dataframe(df_view)
         st.dataframe(df_filtered, use_container_width=True)
@@ -776,13 +794,13 @@ elif page == "🚚 銷售出貨 (業務/出貨)":
         sales_cols = ['單號', '訂單單號', '出貨日期', '系列', '分類', '品名', '貨號', '倉庫', '數量', '運費', 'Key單者', '備註']
         valid_cols = [c for c in sales_cols if c in df_view.columns]
         
-        # ★★★ 加入篩選功能 ★★★
+        # ★★★ 加入篩選器 ★★★
         st.write("---")
         df_filtered = filter_dataframe(df_view[valid_cols])
         st.dataframe(df_filtered, use_container_width=True)
 
 # ---------------------------------------------------------
-# 頁面 0: 總表監控
+# 頁面 0: 總表監控 (主管專用)
 # ---------------------------------------------------------
 elif page == "📊 總表監控 (主管專用)":
     st.subheader("📊 總表監控與資料維護")
@@ -795,7 +813,7 @@ elif page == "📊 總表監控 (主管專用)":
         with tab_inv:
             df_inv = st.session_state['inventory']
             if not df_inv.empty:
-                # ★★★ 加入篩選功能 ★★★
+                # ★★★ 加入篩選器 ★★★
                 df_filtered_inv = filter_dataframe(df_inv)
                 
                 edited_inv = st.data_editor(
@@ -810,7 +828,7 @@ elif page == "📊 總表監控 (主管專用)":
         with tab_hist:
             df_hist = st.session_state['history']
             if not df_hist.empty:
-                # ★★★ 加入篩選功能 ★★★
+                # ★★★ 加入篩選器 ★★★
                 df_filtered_hist = filter_dataframe(df_hist)
                 
                 edited_hist = st.data_editor(
@@ -847,7 +865,7 @@ elif page == "💰 成本與財務管理 (加密)":
             if df_fix.empty:
                 st.info("✅ 無待補登單據")
             else:
-                # ★★★ 加入篩選功能 ★★★
+                # ★★★ 加入篩選器 ★★★
                 df_fix_filtered = filter_dataframe(df_fix)
                 
                 edited = st.data_editor(df_fix_filtered, column_config={"進貨總成本": st.column_config.NumberColumn(required=True)})
@@ -859,7 +877,7 @@ elif page == "💰 成本與財務管理 (加密)":
                     st.success("已更新")
 
         with tab_full:
-            # ★★★ 加入篩選功能 ★★★
+            # ★★★ 加入篩選器 ★★★
             df_all_filtered = filter_dataframe(st.session_state['history'])
             
             edited_all = st.data_editor(df_all_filtered, use_container_width=True, num_rows="dynamic")
