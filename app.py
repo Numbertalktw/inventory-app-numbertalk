@@ -123,11 +123,13 @@ def recalculate_inventory(hist_df, current_inv_df):
             w_name = str(h_row['倉庫']).strip()
             if w_name not in WAREHOUSES: w_name = "Wen"
             
+            # 加項 (進貨/製造入庫/調整入庫/期初建檔/庫存調整(加))
             if doc_type in ['進貨', '製造入庫', '調整入庫', '期初建檔', '庫存調整(加)']:
                 if cost_total > 0:
                     total_value += cost_total
                 total_qty += qty
                 if w_name in w_stock: w_stock[w_name] += qty
+            # 減項 (銷售出貨/製造領料/調整出庫/庫存調整(減))
             elif doc_type in ['銷售出貨', '製造領料', '調整出庫', '庫存調整(減)']:
                 current_avg = (total_value / total_qty) if total_qty > 0 else 0
                 total_qty -= qty
@@ -466,7 +468,7 @@ if page == "📦 商品建檔與維護":
             st.success("✅ 商品資料已更新！")
 
 # ---------------------------------------------------------
-# 頁面 X: 庫存盤點與調整 (新增功能)
+# 頁面 X: 庫存盤點與調整
 # ---------------------------------------------------------
 elif page == "⚖️ 庫存盤點與調整":
     st.subheader("⚖️ 快速修正庫存 (盤點調整)")
@@ -485,7 +487,6 @@ elif page == "⚖️ 庫存盤點與調整":
         with c2:
             sel_wh = st.selectbox("調整哪個倉庫的庫存？", WAREHOUSES)
             
-        # 顯示當前數量
         curr_qty = row[f'庫存_{sel_wh}']
         st.metric(f"目前 {sel_wh} 系統庫存", f"{int(curr_qty)}")
         
@@ -501,9 +502,8 @@ elif page == "⚖️ 庫存盤點與調整":
                 if diff == 0:
                     st.warning("數量未變動，無需調整。")
                 else:
-                    # 判斷是加還是減
                     action = "庫存調整(加)" if diff > 0 else "庫存調整(減)"
-                    final_qty = abs(diff) # 轉為正數寫入數量欄位
+                    final_qty = abs(diff) 
                     
                     rec = {
                         '單據類型': action,
@@ -569,7 +569,6 @@ elif page == "📥 進貨庫存 (無金額)":
         df_view = df[df['單據類型'] == '進貨'].copy()
         # 定義進貨只要看這些就好
         purchase_cols = ['單號', '日期', '廠商', '系列', '分類', '品名', '貨號', '批號', '倉庫', '數量', 'Key單者', '備註']
-        # 確保欄位存在 (防呆)
         valid_cols = [c for c in purchase_cols if c in df_view.columns]
         st.dataframe(df_view[valid_cols], use_container_width=True)
 
@@ -679,10 +678,15 @@ elif page == "🚚 銷售出貨 (業務/出貨)":
                 time.sleep(1)
                 st.rerun()
 
+    # ★★★ 修改處：出貨表欄位最佳化 ★★★
     df = st.session_state['history']
     if not df.empty:
         mask = df['單據類型'].isin(['銷售出貨', '製造領料'])
-        st.dataframe(get_safe_view(df[mask]), use_container_width=True)
+        df_view = df[mask].copy()
+        # 定義出貨只要看這些就好
+        sales_cols = ['單號', '訂單單號', '出貨日期', '系列', '分類', '品名', '貨號', '倉庫', '數量', '運費', 'Key單者', '備註']
+        valid_cols = [c for c in sales_cols if c in df_view.columns]
+        st.dataframe(df_view[valid_cols], use_container_width=True)
 
 # ---------------------------------------------------------
 # 頁面 0: 總表監控
