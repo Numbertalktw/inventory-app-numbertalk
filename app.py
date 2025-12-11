@@ -55,9 +55,7 @@ PREFIX_MAP = {
 # ==========================================
 
 def filter_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    通用篩選器 UI 元件 (含全選功能)
-    """
+    """通用篩選器 UI 元件 (含全選功能)"""
     modify = st.checkbox("🔍 開啟資料篩選器 (Filter Data)")
 
     if not modify:
@@ -83,60 +81,38 @@ def filter_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             left.write("↳")
             
             # 處理各種資料類型的篩選邏輯
-            # 1. 選項類 (文字/分類)
             if is_categorical_dtype(df[column]) or df[column].nunique() < 50:
                 options = sorted(df[column].astype(str).unique().tolist())
-                
-                # 全選功能
                 use_all = right.checkbox(f"全選 (Select All) - {column}", value=True, key=f"chk_{column}")
                 
                 if use_all:
                     user_cat_input = options
                     right.caption(f"✅ 已顯示所有內容 ({len(options)} 項)")
                 else:
-                    user_cat_input = right.multiselect(
-                        f"請選擇 {column} 的內容",
-                        options,
-                        default=[] 
-                    )
+                    user_cat_input = right.multiselect(f"請選擇 {column} 的內容", options, default=[])
                 
                 if user_cat_input:
                     df = df[df[column].astype(str).isin(user_cat_input)]
                 else:
-                    if not use_all: # 如果取消全選且沒選任何項目，顯示空
+                    if not use_all:
                         df = df[df[column].astype(str).isin([])]
                 
-            # 2. 數字類
             elif is_numeric_dtype(df[column]):
                 _min = float(df[column].min())
                 _max = float(df[column].max())
                 step = (_max - _min) / 100
-                user_num_input = right.slider(
-                    f"設定 {column} 的範圍",
-                    min_value=_min,
-                    max_value=_max,
-                    value=(_min, _max),
-                    step=step,
-                )
+                user_num_input = right.slider(f"設定 {column} 的範圍", min_value=_min, max_value=_max, value=(_min, _max), step=step)
                 df = df[df[column].between(*user_num_input)]
                 
-            # 3. 日期類
             elif is_datetime64_any_dtype(df[column]):
-                user_date_input = right.date_input(
-                    f"選擇 {column} 的範圍",
-                    value=(df[column].min(), df[column].max()),
-                )
+                user_date_input = right.date_input(f"選擇 {column} 的範圍", value=(df[column].min(), df[column].max()))
                 if len(user_date_input) == 2:
                     user_date_input = tuple(map(pd.to_datetime, user_date_input))
                     start_date, end_date = user_date_input
                     df = df.loc[df[column] >= start_date]
                     df = df.loc[df[column] <= end_date]
-                    
-            # 4. 其他文字 (搜尋)
             else:
-                user_text_input = right.text_input(
-                    f"搜尋 {column} 包含的字串",
-                )
+                user_text_input = right.text_input(f"搜尋 {column} 包含的字串")
                 if user_text_input:
                     df = df[df[column].astype(str).str.contains(user_text_input, case=False)]
 
@@ -590,11 +566,13 @@ elif page == "⚖️ 庫存盤點與調整":
             
             if st.form_submit_button("✅ 確認修正庫存"):
                 diff = new_qty - curr_qty
+                
                 if diff == 0:
                     st.warning("數量未變動，無需調整。")
                 else:
                     action = "庫存調整(加)" if diff > 0 else "庫存調整(減)"
                     final_qty = abs(diff) 
+                    
                     rec = {
                         '單據類型': action,
                         '單號': f"ADJ-{int(time.time())}",
@@ -606,6 +584,7 @@ elif page == "⚖️ 庫存盤點與調整":
                         'Key單者': '盤點調整',
                         '備註': f"{adj_reason} (原:{int(curr_qty)} -> 新:{int(new_qty)})"
                     }
+                    
                     # 補齊其他可能缺失的欄位
                     for c in HISTORY_COLUMNS:
                         if c not in rec: rec[c] = ""
