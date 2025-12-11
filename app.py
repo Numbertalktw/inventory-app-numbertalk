@@ -1,5 +1,11 @@
 import streamlit as st
 import pandas as pd
+from pandas.api.types import (
+    is_categorical_dtype,
+    is_datetime64_any_dtype,
+    is_numeric_dtype,
+    is_object_dtype,
+)
 from datetime import date, datetime
 import os
 import time
@@ -47,6 +53,84 @@ PREFIX_MAP = {
 # ==========================================
 # 2. 核心函式
 # ==========================================
+
+def filter_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    通用篩選器 UI 元件
+    讓使用者可以針對 DataFrame 的任意欄位進行篩選
+    """
+    modify = st.checkbox("🔍 開啟資料篩選器 (Filter Data)")
+
+    if not modify:
+        return df
+
+    df = df.copy()
+
+    # 嘗試轉換日期欄位格式以便篩選
+    for col in df.columns:
+        if is_object_dtype(df[col]):
+            try:
+                df[col] = pd.to_datetime(df[col])
+            except Exception:
+                pass
+
+    modification_container = st.container()
+
+    with modification_container:
+        to_filter_columns = st.multiselect("選擇要篩選的欄位", df.columns)
+        
+        for column in to_filter_columns:
+            left, right = st.columns((1, 20))
+            left.write("↳")
+            
+            # 處理各種資料類型的篩選邏輯
+            if is_categorical_dtype(df[column]) or df[column].nunique() < 20:
+                # 如果選項少，用多選選單
+                user_cat_input = right.multiselect(
+                    f"選擇 {column} 的內容",
+                    df[column].unique(),
+                    default=list(df[column].unique()),
+                )
+                df = df[df[column].isin(user_cat_input)]
+                
+            elif is_numeric_dtype(df[column]):
+                # 如果是數字，用範圍滑桿
+                _min = float(df[column].min())
+                _max = float(df[column].max())
+                step = (_max - _min) / 100
+                user_num_input = right.slider(
+                    f"設定 {column} 的範圍",
+                    min_value=_min,
+                    max_value=_max,
+                    value=(_min, _max),
+                    step=step,
+                )
+                df = df[df[column].between(*user_num_input)]
+                
+            elif is_datetime64_any_dtype(df[column]):
+                # 如果是日期，用日期選擇器
+                user_date_input = right.date_input(
+                    f"選擇 {column} 的範圍",
+                    value=(
+                        df[column].min(),
+                        df[column].max(),
+                    ),
+                )
+                if len(user_date_input) == 2:
+                    user_date_input = tuple(map(pd.to_datetime, user_date_input))
+                    start_date, end_date = user_date_input
+                    df = df.loc[df[column] >= start_date]
+                    df = df.loc[df[column] <= end_date]
+                    
+            else:
+                # 其他文字，用關鍵字搜尋
+                user_text_input = right.text_input(
+                    f"搜尋 {column} 包含的字串",
+                )
+                if user_text_input:
+                    df = df[df[column].astype(str).str.contains(user_text_input, case=False)]
+
+    return df
 
 def load_data():
     """讀取 CSV 資料"""
@@ -123,13 +207,11 @@ def recalculate_inventory(hist_df, current_inv_df):
             w_name = str(h_row['倉庫']).strip()
             if w_name not in WAREHOUSES: w_name = "Wen"
             
-            # 加項 (進貨/製造入庫/調整入庫/期初建檔/庫存調整(加))
             if doc_type in ['進貨', '製造入庫', '調整入庫', '期初建檔', '庫存調整(加)']:
                 if cost_total > 0:
                     total_value += cost_total
                 total_qty += qty
                 if w_name in w_stock: w_stock[w_name] += qty
-            # 減項 (銷售出貨/製造領料/調整出庫/庫存調整(減))
             elif doc_type in ['銷售出貨', '製造領料', '調整出庫', '庫存調整(減)']:
                 current_avg = (total_value / total_qty) if total_qty > 0 else 0
                 total_qty -= qty
@@ -443,6 +525,10 @@ if page == "📦 商品建檔與維護":
     with tab_list:
         st.info("此處可直接修改品名、分類或系列。修改後請務必按下「儲存修改」按鈕。")
         df_safe = get_safe_view(st.session_state['inventory'])
+        
+        # ★★★ 加入篩選功能 ★★★
+        df_safe = filter_dataframe(df_safe)
+        
         edited_products = st.data_editor(
             df_safe,
             use_container_width=True,
@@ -472,8 +558,6 @@ if page == "📦 商品建檔與維護":
 # ---------------------------------------------------------
 elif page == "⚖️ 庫存盤點與調整":
     st.subheader("⚖️ 快速修正庫存 (盤點調整)")
-    st.info("此功能會自動產生一筆調整單，讓庫存變成您輸入的正確數字。")
-    
     inv_df = st.session_state['inventory']
     if inv_df.empty:
         st.warning("無商品資料")
@@ -563,14 +647,16 @@ elif page == "📥 進貨庫存 (無金額)":
                 time.sleep(1)
                 st.rerun()
     
-    # ★★★ 修改處：只顯示相關欄位 ★★★
     df = st.session_state['history']
     if not df.empty:
         df_view = df[df['單據類型'] == '進貨'].copy()
-        # 定義進貨只要看這些就好
         purchase_cols = ['單號', '日期', '廠商', '系列', '分類', '品名', '貨號', '批號', '倉庫', '數量', 'Key單者', '備註']
         valid_cols = [c for c in purchase_cols if c in df_view.columns]
-        st.dataframe(df_view[valid_cols], use_container_width=True)
+        
+        # ★★★ 加入篩選功能 ★★★
+        st.write("---")
+        df_filtered = filter_dataframe(df_view[valid_cols])
+        st.dataframe(df_filtered, use_container_width=True)
 
 # ---------------------------------------------------------
 # 頁面 3: 製造
@@ -639,7 +725,12 @@ elif page == "🔨 製造生產 (工廠)":
     df = st.session_state['history']
     if not df.empty:
         mask = df['單據類型'].astype(str).str.contains('製造')
-        st.dataframe(get_safe_view(df[mask]), use_container_width=True)
+        df_view = get_safe_view(df[mask])
+        
+        # ★★★ 加入篩選功能 ★★★
+        st.write("---")
+        df_filtered = filter_dataframe(df_view)
+        st.dataframe(df_filtered, use_container_width=True)
 
 # ---------------------------------------------------------
 # 頁面 4: 出貨
@@ -678,15 +769,17 @@ elif page == "🚚 銷售出貨 (業務/出貨)":
                 time.sleep(1)
                 st.rerun()
 
-    # ★★★ 修改處：出貨表欄位最佳化 ★★★
     df = st.session_state['history']
     if not df.empty:
         mask = df['單據類型'].isin(['銷售出貨', '製造領料'])
         df_view = df[mask].copy()
-        # 定義出貨只要看這些就好
         sales_cols = ['單號', '訂單單號', '出貨日期', '系列', '分類', '品名', '貨號', '倉庫', '數量', '運費', 'Key單者', '備註']
         valid_cols = [c for c in sales_cols if c in df_view.columns]
-        st.dataframe(df_view[valid_cols], use_container_width=True)
+        
+        # ★★★ 加入篩選功能 ★★★
+        st.write("---")
+        df_filtered = filter_dataframe(df_view[valid_cols])
+        st.dataframe(df_filtered, use_container_width=True)
 
 # ---------------------------------------------------------
 # 頁面 0: 總表監控
@@ -702,8 +795,11 @@ elif page == "📊 總表監控 (主管專用)":
         with tab_inv:
             df_inv = st.session_state['inventory']
             if not df_inv.empty:
+                # ★★★ 加入篩選功能 ★★★
+                df_filtered_inv = filter_dataframe(df_inv)
+                
                 edited_inv = st.data_editor(
-                    df_inv, use_container_width=True, num_rows="dynamic",
+                    df_filtered_inv, use_container_width=True, num_rows="dynamic",
                     column_config={"總庫存": st.column_config.NumberColumn(disabled=True)}
                 )
                 if st.button("💾 儲存商品資料變更"):
@@ -714,15 +810,11 @@ elif page == "📊 總表監控 (主管專用)":
         with tab_hist:
             df_hist = st.session_state['history']
             if not df_hist.empty:
-                search = st.text_input("🔍 全局搜尋", "")
-                if search:
-                    mask = df_hist.astype(str).apply(lambda x: x.str.contains(search, case=False)).any(axis=1)
-                    df_display = df_hist[mask]
-                else:
-                    df_display = df_hist
+                # ★★★ 加入篩選功能 ★★★
+                df_filtered_hist = filter_dataframe(df_hist)
                 
                 edited_hist = st.data_editor(
-                    df_display, use_container_width=True, num_rows="dynamic", height=600,
+                    df_filtered_hist, use_container_width=True, num_rows="dynamic", height=600,
                     column_config={
                         "倉庫": st.column_config.SelectboxColumn("倉庫", options=WAREHOUSES),
                         "單據類型": st.column_config.SelectboxColumn("單據類型", options=["進貨", "銷售出貨", "製造領料", "製造入庫", "期初建檔", "庫存調整(加)", "庫存調整(減)"])
@@ -755,7 +847,10 @@ elif page == "💰 成本與財務管理 (加密)":
             if df_fix.empty:
                 st.info("✅ 無待補登單據")
             else:
-                edited = st.data_editor(df_fix, column_config={"進貨總成本": st.column_config.NumberColumn(required=True)})
+                # ★★★ 加入篩選功能 ★★★
+                df_fix_filtered = filter_dataframe(df_fix)
+                
+                edited = st.data_editor(df_fix_filtered, column_config={"進貨總成本": st.column_config.NumberColumn(required=True)})
                 if st.button("💾 儲存"):
                     df.update(edited)
                     st.session_state['history'] = df
@@ -764,7 +859,10 @@ elif page == "💰 成本與財務管理 (加密)":
                     st.success("已更新")
 
         with tab_full:
-            edited_all = st.data_editor(st.session_state['history'], use_container_width=True, num_rows="dynamic")
+            # ★★★ 加入篩選功能 ★★★
+            df_all_filtered = filter_dataframe(st.session_state['history'])
+            
+            edited_all = st.data_editor(df_all_filtered, use_container_width=True, num_rows="dynamic")
             if st.button("💾 儲存修正"):
                 st.session_state['history'] = edited_all
                 st.session_state['inventory'] = recalculate_inventory(edited_all, st.session_state['inventory'])
