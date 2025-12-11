@@ -8,12 +8,11 @@ import time
 # 1. 系統設定
 # ==========================================
 
-PAGE_TITLE = "商品庫存 & 出貨管理系統"
-INVENTORY_FILE = 'inventory_data_final.csv'
-HISTORY_FILE = 'history_data_final.csv'
+PAGE_TITLE = "商品庫存 & 出貨管理系統 (自動拆分版)"
+INVENTORY_FILE = 'inventory_data_auto.csv'
+HISTORY_FILE = 'history_data_auto.csv'
 
-# --- 商品出貨表 (流水帳) 18 欄位 ---
-# 對應您的 Excel 截圖 A~R 欄
+# --- 出貨表 (流水帳) 18 欄位 ---
 HISTORY_COLUMNS = [
     '單號', '日期', '系列', '分類', '品名', '貨號', 
     '出庫單號(可複寫)', '出入庫', '數量', '經手人', 
@@ -21,8 +20,7 @@ HISTORY_COLUMNS = [
     '款項結清', '工資', '發票', '備註'
 ]
 
-# --- 商品庫存表 (總量狀態) ---
-# 用於快速查看還有多少貨
+# --- 庫存表 (系統自動計算) ---
 INVENTORY_COLUMNS = [
     '貨號', '系列', '分類', '品名', 
     '庫存數量', '平均成本'
@@ -38,7 +36,6 @@ DEFAULT_HANDLERS = ["Wen", "店長", "小幫手"]
 
 def load_data():
     """讀取資料"""
-    # 庫存
     if os.path.exists(INVENTORY_FILE):
         try:
             inv_df = pd.read_csv(INVENTORY_FILE)
@@ -48,11 +45,9 @@ def load_data():
     else:
         inv_df = pd.DataFrame(columns=INVENTORY_COLUMNS)
 
-    # 紀錄
     if os.path.exists(HISTORY_FILE):
         try:
             hist_df = pd.read_csv(HISTORY_FILE)
-            # 確保欄位順序正確
             for col in HISTORY_COLUMNS:
                 if col not in hist_df.columns:
                     hist_df[col] = ""
@@ -71,66 +66,70 @@ def save_data():
     if 'history' in st.session_state:
         st.session_state['history'].to_csv(HISTORY_FILE, index=False, encoding='utf-8-sig')
 
-def process_history_upload(file_obj):
-    """處理 18 欄位的出貨表上傳"""
+def process_master_upload(file_obj):
+    """
+    核心邏輯：
+    1. 讀取總表 -> 成為 History
+    2. 根據 '貨號' 與 '出入庫' -> 計算 Inventory
+    """
     try:
+        # 1. 讀取檔案
         if file_obj.name.endswith('.csv'):
             df = pd.read_csv(file_obj)
         else:
             df = pd.read_excel(file_obj)
         
-        # 簡單的欄位名稱容錯 (若 Excel 標題有些微差異)
+        # 欄位對應容錯
         rename_map = {
             '出庫單號': '出庫單號(可複寫)',
             '商品貨號': '貨號', '商品品名': '品名', '商品系列': '系列', '商品分類': '分類'
         }
         df = df.rename(columns=rename_map)
 
-        # 確保擁有所有 18 個欄位，沒有的補空值
+        # 補齊 18 欄位
         for col in HISTORY_COLUMNS:
             if col not in df.columns:
                 df[col] = ""
         
-        # 格式整理
+        # 轉型與處理空值
         df['單號'] = df['單號'].astype(str)
         df['貨號'] = df['貨號'].astype(str)
+        df['數量'] = pd.to_numeric(df['數量'], errors='coerce').fillna(0)
         
-        return df[HISTORY_COLUMNS]
-    except Exception as e:
-        st.error(f"出貨表解析失敗: {e}")
-        return None
+        # --- 產生 History Table ---
+        history_df = df[HISTORY_COLUMNS].copy()
 
-def process_inventory_upload(file_obj):
-    """處理庫存表上傳"""
-    try:
-        if file_obj.name.endswith('.csv'):
-            df = pd.read_csv(file_obj)
-        else:
-            df = pd.read_excel(file_obj)
+        # --- 自動計算 Inventory Table ---
+        # 取得所有唯一的商品資訊
+        inventory_items = df[['貨號', '系列', '分類', '品名']].drop_duplicates(subset=['貨號']).copy()
         
-        col_map = {
-            '名稱': '品名', '商品名稱': '品名',
-            '數量': '庫存數量', '庫存': '庫存數量',
-            '成本': '平均成本', '單價': '平均成本',
-            '類別': '分類', '商品分類': '分類'
-        }
-        df = df.rename(columns=col_map)
-        
-        for col in INVENTORY_COLUMNS:
-            if col not in df.columns:
-                if col == '庫存數量' or col == '平均成本': df[col] = 0
-                else: df[col] = ""
-        
-        df['貨號'] = df['貨號'].astype(str).replace('nan', '')
-        # 若無貨號自動產生
-        for idx, row in df.iterrows():
-            if not row['貨號'] or row['貨號'] == 'nan':
-                 df.at[idx, '貨號'] = f"AUTO-{idx}"
+        # 計算庫存數量
+        # 邏輯：如果 '出入庫' 欄位包含 "入庫" 則加，包含 "出庫" 則減
+        inventory_items['庫存數量'] = 0.0
+        inventory_items['平均成本'] = 0.0 # 若 Excel 沒提供成本，暫設為 0
 
-        return df[INVENTORY_COLUMNS]
+        for idx, row in inventory_items.iterrows():
+            sku = row['貨號']
+            # 找出該貨號的所有紀錄
+            item_hist = df[df['貨號'] == sku]
+            
+            total_stock = 0
+            for _, h_row in item_hist.iterrows():
+                qty = h_row['數量']
+                action = str(h_row['出入庫'])
+                
+                if "入庫" in action:
+                    total_stock += qty
+                elif "出庫" in action:
+                    total_stock -= qty
+            
+            inventory_items.at[idx, '庫存數量'] = total_stock
+
+        return history_df, inventory_items[INVENTORY_COLUMNS]
+
     except Exception as e:
-        st.error(f"庫存表解析失敗: {e}")
-        return None
+        st.error(f"檔案解析失敗: {e}")
+        return None, None
 
 # ==========================================
 # 3. 初始化
@@ -148,73 +147,77 @@ if 'inventory' not in st.session_state:
 st.set_page_config(page_title=PAGE_TITLE, layout="wide", page_icon="🏢")
 st.title(f"🏢 {PAGE_TITLE}")
 
-# --- 側邊欄：清楚區分兩個表的管理 ---
+# --- 側邊欄 ---
 with st.sidebar:
     st.header("功能導航")
-    page = st.radio("前往", ["📊 商品庫存表 (總量)", "🚚 商品出貨表 (流水帳)", "➕ 新增出入庫單據"])
+    page = st.radio("前往", ["📤 上傳總表 (自動拆分)", "🚚 查看出貨表 (歷史)", "📊 查看庫存表 (狀態)", "➕ 新增單據"])
     
     st.divider()
-    st.header("💾 資料匯入/匯出")
-    
-    # 區塊 1: 出貨表管理
-    with st.expander("🚚 出貨表 (Excel 18欄)", expanded=True):
-        st.caption("上傳完整的進出貨紀錄")
-        up_hist = st.file_uploader("上傳出貨紀錄 (.xlsx)", type=['xlsx', 'xls', 'csv'], key="hist_up")
-        if up_hist and st.button("確認匯入出貨表"):
-            new_hist = process_history_upload(up_hist)
-            if new_hist is not None:
-                st.session_state['history'] = new_hist
-                
-                # 自動建立庫存清單 (方便使用者)
-                if not new_hist.empty and st.session_state['inventory'].empty:
-                    unique_items = new_hist[['貨號', '系列', '分類', '品名']].drop_duplicates(subset=['貨號'])
-                    unique_items['庫存數量'] = 0 
-                    unique_items['平均成本'] = 0
-                    st.session_state['inventory'] = unique_items[INVENTORY_COLUMNS]
-                    st.success(f"已匯入紀錄，並自動建立 {len(unique_items)} 筆商品資料！")
-                
-                save_data()
-                st.rerun()
-                
-        if not st.session_state['history'].empty:
-            csv_h = st.session_state['history'].to_csv(index=False).encode('utf-8-sig')
-            st.download_button("📥 下載出貨表", csv_h, f'Shipment_History_{date.today()}.csv', "text/csv")
-
-    # 區塊 2: 庫存表管理
-    with st.expander("📊 庫存表 (庫存盤點)", expanded=False):
-        st.caption("上傳當下的庫存數量")
-        up_inv = st.file_uploader("上傳庫存清單 (.xlsx)", type=['xlsx', 'xls', 'csv'], key="inv_up")
-        if up_inv and st.button("確認匯入庫存表"):
-            new_inv = process_inventory_upload(up_inv)
-            if new_inv is not None:
-                st.session_state['inventory'] = new_inv
-                save_data()
-                st.rerun()
+    st.header("💾 資料匯出")
+    if not st.session_state['inventory'].empty:
+        csv_i = st.session_state['inventory'].to_csv(index=False).encode('utf-8-sig')
+        st.download_button("📥 下載【庫存表】", csv_i, f'Stock_{date.today()}.csv', "text/csv")
         
-        if not st.session_state['inventory'].empty:
-            csv_i = st.session_state['inventory'].to_csv(index=False).encode('utf-8-sig')
-            st.download_button("📥 下載庫存表", csv_i, f'Inventory_Stock_{date.today()}.csv', "text/csv")
+    if not st.session_state['history'].empty:
+        csv_h = st.session_state['history'].to_csv(index=False).encode('utf-8-sig')
+        st.download_button("📥 下載【出貨表/總表】", csv_h, f'Master_History_{date.today()}.csv', "text/csv")
 
 # ---------------------------------------------------------
-# 頁面 1: 商品庫存表
+# 頁面 1: 上傳總表 (核心功能)
 # ---------------------------------------------------------
-if page == "📊 商品庫存表 (總量)":
-    st.subheader("📊 商品庫存表")
-    st.caption("此表顯示目前倉庫內的「剩餘數量」與「成本狀態」。")
+if page == "📤 上傳總表 (自動拆分)":
+    st.subheader("📤 上傳總表 (Master File)")
+    st.info("請上傳您的 Excel 總表 (含18個欄位)。系統將自動儲存紀錄，並幫您算出庫存量。")
     
-    df_inv = st.session_state['inventory']
-    if df_inv.empty:
-        st.info("目前無庫存資料。請從左側上傳 Excel，或前往「新增出入庫單據」建立。")
+    uploaded_file = st.file_uploader("選擇檔案 (.xlsx / .csv)", type=['xlsx', 'xls', 'csv'])
+    
+    if uploaded_file is not None:
+        if st.button("🚀 開始拆分並匯入", type="primary"):
+            hist_df, inv_df = process_master_upload(uploaded_file)
+            
+            if hist_df is not None and inv_df is not None:
+                st.session_state['history'] = hist_df
+                st.session_state['inventory'] = inv_df
+                save_data()
+                
+                st.success(f"✅ 成功！已匯入 {len(hist_df)} 筆交易紀錄。")
+                st.success(f"✅ 自動計算出 {len(inv_df)} 項商品的庫存數量。")
+                time.sleep(1)
+
+# ---------------------------------------------------------
+# 頁面 2: 出貨表
+# ---------------------------------------------------------
+elif page == "🚚 查看出貨表 (歷史)":
+    st.subheader("🚚 商品出貨表 (流水帳)")
+    df = st.session_state['history']
+    
+    if df.empty:
+        st.warning("目前無資料。請先到「上傳總表」匯入 Excel。")
     else:
-        # 簡單的統計指標
-        total_items = len(df_inv)
-        total_stock = df_inv['庫存數量'].sum()
-        c1, c2 = st.columns(2)
-        c1.metric("商品品項數", f"{total_items} 款")
-        c2.metric("庫存總數量", f"{total_stock:,.0f} 個")
-        
+        search = st.text_input("🔍 搜尋紀錄", "")
+        if search:
+            mask = df.astype(str).apply(lambda x: x.str.contains(search, case=False)).any(axis=1)
+            df = df[mask]
+            
+        edited_df = st.data_editor(df, use_container_width=True, num_rows="dynamic", height=600)
+        if st.button("💾 儲存修改"):
+            st.session_state['history'] = edited_df
+            save_data()
+            st.success("已更新")
+
+# ---------------------------------------------------------
+# 頁面 3: 庫存表
+# ---------------------------------------------------------
+elif page == "📊 查看庫存表 (狀態)":
+    st.subheader("📊 商品庫存表 (系統自動計算)")
+    st.caption("此表是根據「出貨表」的 入庫-出庫 自動計算出來的結果。")
+    
+    df = st.session_state['inventory']
+    if df.empty:
+        st.warning("目前無庫存資料。")
+    else:
         st.dataframe(
-            df_inv, 
+            df, 
             use_container_width=True,
             column_config={
                 "庫存數量": st.column_config.NumberColumn(format="%d"),
@@ -223,128 +226,65 @@ if page == "📊 商品庫存表 (總量)":
         )
 
 # ---------------------------------------------------------
-# 頁面 2: 商品出貨表 (您的 Excel 18 欄位)
+# 頁面 4: 新增單據
 # ---------------------------------------------------------
-elif page == "🚚 商品出貨表 (流水帳)":
-    st.subheader("🚚 商品出貨表 (歷史紀錄)")
-    st.caption("此表顯示完整的 18 欄位進出貨明細 (對應您的 Excel)。")
-    
-    df_hist = st.session_state['history']
-    if df_hist.empty:
-        st.warning("目前無出貨紀錄。請從左側「出貨表」區塊上傳您的 Excel。")
-    else:
-        # 搜尋功能
-        search = st.text_input("🔍 搜尋 (單號/品名/訂單)", "")
-        if search:
-            mask = df_hist.astype(str).apply(lambda x: x.str.contains(search, case=False)).any(axis=1)
-            df_hist = df_hist[mask]
-            
-        # 可編輯的表格
-        edited_df = st.data_editor(
-            df_hist,
-            use_container_width=True,
-            num_rows="dynamic",
-            height=600,
-            key="hist_editor"
-        )
-        
-        if st.button("💾 儲存表格修改"):
-            st.session_state['history'] = edited_df
-            save_data()
-            st.success("已更新出貨表！")
-
-# ---------------------------------------------------------
-# 頁面 3: 新增單據
-# ---------------------------------------------------------
-elif page == "➕ 新增出入庫單據":
-    st.subheader("➕ 新增出入庫單據")
-    st.caption("在此輸入每一筆異動，系統會同時寫入「出貨表」並更新「庫存表」數量。")
+elif page == "➕ 新增單據":
+    st.subheader("➕ 新增單據")
+    st.caption("新增後會同時寫入出貨表，並更新庫存表。")
     
     inv_df = st.session_state['inventory']
-    
     if inv_df.empty:
-        st.warning("⚠️ 請先建立商品資料 (可透過左側上傳出貨表 Excel 自動建立)。")
+        st.warning("請先上傳總表建立基礎資料。")
     else:
-        # 製作選單標籤
         inv_df['label'] = inv_df['貨號'] + " | " + inv_df['品名'] + " | 剩餘:" + inv_df['庫存數量'].astype(str)
-        
-        c_sel, c_act = st.columns([2, 1])
-        with c_sel:
-            selected_label = st.selectbox("選擇商品", inv_df['label'].tolist())
-            row = inv_df[inv_df['label'] == selected_label].iloc[0]
-            idx = inv_df[inv_df['label'] == selected_label].index[0]
-        with c_act:
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            sel = st.selectbox("選擇商品", inv_df['label'].tolist())
+            row = inv_df[inv_df['label'] == sel].iloc[0]
+            idx = inv_df[inv_df['label'] == sel].index[0]
+        with c2:
             act = st.radio("動作", ["入庫", "出庫"], horizontal=True)
-
+            
         st.divider()
-
-        with st.form("transaction_entry"):
-            # 1. 基本 (自動產生 A, 手填 B, I, J)
-            col1, col2, col3 = st.columns(3)
-            txn_date = col1.date_input("日期", value=date.today())
-            qty = col2.number_input("數量", min_value=1, value=1)
-            handler = col3.selectbox("經手人", DEFAULT_HANDLERS)
+        with st.form("entry"):
+            # 18欄輸入介面
+            r1c1, r1c2, r1c3 = st.columns(3)
+            date_val = r1c1.date_input("日期", date.today())
+            qty_val = r1c2.number_input("數量", 1)
+            hand_val = r1c3.selectbox("經手人", DEFAULT_HANDLERS)
             
-            st.info(f"商品資訊：{row['系列']} - {row['分類']} - {row['品名']} ({row['貨號']})")
+            r2c1, r2c2, r2c3, r2c4 = st.columns(4)
+            ord_id = r2c1.text_input("訂單單號")
+            ship_d = r2c2.date_input("出貨日期", date.today())
+            out_id = r2c3.text_input("出庫單號")
+            sku_nt = r2c4.text_input("貨號備註")
             
-            # 2. 單據 (G, K, L, M)
-            col4, col5, col6, col7 = st.columns(4)
-            order_id = col4.text_input("訂單單號")
-            ship_date = col5.date_input("出貨日期", value=date.today())
-            out_id = col6.text_input("出庫單號 (可複寫)")
-            sku_note = col7.text_input("貨號備註")
-
-            # 3. 費用 (N, O, P, Q)
-            col8, col9, col10, col11 = st.columns(4)
-            fee = col8.text_input("運費")
-            pay = col9.selectbox("款項結清", ["", "是", "否", "部分"])
-            labor = col10.text_input("工資")
-            inv_no = col11.text_input("發票")
-            
+            r3c1, r3c2, r3c3, r3c4 = st.columns(4)
+            fee = r3c1.text_input("運費")
+            pay = r3c2.selectbox("結清", ["", "是", "否"])
+            lab = r3c3.text_input("工資")
+            inv_n = r3c4.text_input("發票")
             note = st.text_area("備註")
-            
-            # 成本輸入 (僅入庫用)
-            cost_in = 0
-            if act == "入庫":
-                cost_in = st.number_input("本次進貨總成本 (更新平均成本用)", min_value=0)
 
-            if st.form_submit_button("✅ 確認新增"):
-                # 1. 準備資料
-                now_str = datetime.now().strftime('%Y%m%d%H%M%S')
-                record_id = f"{now_str}"
+            if st.form_submit_button("✅ 確認"):
+                # 更新庫存
+                curr = float(row['庫存數量'])
+                if act == "入庫": st.session_state['inventory'].at[idx, '庫存數量'] = curr + qty_val
+                else: st.session_state['inventory'].at[idx, '庫存數量'] = curr - qty_val
                 
-                final_out_id = out_id
-                if act == "出庫" and not final_out_id:
-                    final_out_id = f"OUT-{datetime.now().strftime('%Y%m%d')}"
-                
-                io_str = f"{act}-{handler}"
-
-                # 2. 更新庫存表 (Stock)
-                curr_qty = float(row['庫存數量'])
-                curr_cost = float(row['平均成本'])
-                
-                if act == "入庫":
-                    new_qty = curr_qty + qty
-                    new_avg = ((curr_qty * curr_cost) + cost_in) / new_qty if new_qty > 0 else 0
-                    st.session_state['inventory'].at[idx, '庫存數量'] = new_qty
-                    st.session_state['inventory'].at[idx, '平均成本'] = new_avg
-                else:
-                    new_qty = curr_qty - qty
-                    st.session_state['inventory'].at[idx, '庫存數量'] = new_qty
-                
-                # 3. 寫入出貨表 (History - 18 Cols)
-                new_rec = {
-                    '單號': record_id, '日期': txn_date,
+                # 寫入歷史
+                rec = {
+                    '單號': datetime.now().strftime('%Y%m%d%H%M%S'),
+                    '日期': date_val,
                     '系列': row['系列'], '分類': row['分類'], '品名': row['品名'], '貨號': row['貨號'],
-                    '出庫單號(可複寫)': final_out_id, '出入庫': io_str,
-                    '數量': qty, '經手人': handler,
-                    '訂單單號': order_id, '出貨日期': ship_date if act == '出庫' else None,
-                    '貨號備註': sku_note, '運費': fee,
-                    '款項結清': pay, '工資': labor, '發票': inv_no, '備註': note
+                    '出庫單號(可複寫)': out_id, '出入庫': f"{act}-{hand_val}",
+                    '數量': qty_val, '經手人': hand_val,
+                    '訂單單號': ord_id, '出貨日期': ship_d if act == '出庫' else None,
+                    '貨號備註': sku_nt, '運費': fee,
+                    '款項結清': pay, '工資': lab, '發票': inv_n, '備註': note
                 }
-                
-                st.session_state['history'] = pd.concat([st.session_state['history'], pd.DataFrame([new_rec])], ignore_index=True)
+                st.session_state['history'] = pd.concat([st.session_state['history'], pd.DataFrame([rec])], ignore_index=True)
                 save_data()
-                st.success("已成功新增單據！")
+                st.success("成功！")
                 time.sleep(1)
                 st.rerun()
