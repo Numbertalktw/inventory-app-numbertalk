@@ -9,7 +9,9 @@ import io
 # 1. 系統設定
 # ==========================================
 
-PAGE_TITLE = "製造庫存系統 (運費開放版)"
+# ★★★ 修改處：已移除後方括號文字 ★★★
+PAGE_TITLE = "製造庫存系統" 
+
 INVENTORY_FILE = 'inventory_secure_v2.csv'
 HISTORY_FILE = 'history_secure_v2.csv'
 ADMIN_PASSWORD = "8888"  # 管理員密碼
@@ -56,6 +58,7 @@ def load_data():
             hist_df = pd.read_csv(HISTORY_FILE)
             for col in HISTORY_COLUMNS:
                 if col not in hist_df.columns:
+                    # 修正：運費與工資預設補 0，避免計算錯誤
                     hist_df[col] = "" if col not in ['數量', '進貨總成本', '運費', '工資'] else 0
             hist_df = hist_df[HISTORY_COLUMNS]
             
@@ -127,9 +130,9 @@ def gen_batch_number(prefix="BAT"):
 def get_safe_view(df):
     """
     回傳「不含敏感欄位」的表格。
-    ★ 修改：將 '運費' 從敏感名單移除，開放給出貨人員查看。
+    ★ 運費已開放給出貨人員查看。
     """
-    sensitive_cols = ['進貨總成本', '均價', '工資', '款項結清'] # 已移除 '運費'
+    sensitive_cols = ['進貨總成本', '均價', '工資', '款項結清']
     safe_cols = [c for c in df.columns if c not in sensitive_cols]
     return df[safe_cols]
 
@@ -299,7 +302,7 @@ elif page == "🔨 製造生產 (工廠)":
         st.dataframe(get_safe_view(df[mask]), use_container_width=True)
 
 # ---------------------------------------------------------
-# 頁面 3: 商品出貨表 (新增運費欄位)
+# 頁面 3: 商品出貨表
 # ---------------------------------------------------------
 elif page == "🚚 銷售出貨 (業務/出貨)":
     st.subheader("🚚 出貨紀錄表")
@@ -315,7 +318,7 @@ elif page == "🚚 銷售出貨 (業務/出貨)":
             
             c3, c4, c5 = st.columns(3)
             s_qty = c3.number_input("數量", 1)
-            s_fee = c4.number_input("運費 (出貨人員填寫)", 0) # ★★★ 新增：運費輸入 ★★★
+            s_fee = c4.number_input("運費", 0)
             s_date = c5.date_input("出貨日期", date.today())
             
             c6, c7 = st.columns(2)
@@ -331,7 +334,7 @@ elif page == "🚚 銷售出貨 (業務/出貨)":
                     '日期': s_date, '系列': s_row['系列'], '分類': s_row['分類'], 
                     '品名': s_row['品名'], '貨號': s_row['貨號'], '批號': '',
                     '倉庫': s_wh, '數量': s_qty, 'Key單者': s_user, 
-                    '訂單單號': s_ord, '運費': s_fee, '備註': s_note # ★★★ 寫入運費 ★★★
+                    '訂單單號': s_ord, '運費': s_fee, '備註': s_note
                 }
                 st.session_state['history'] = pd.concat([st.session_state['history'], pd.DataFrame([rec])], ignore_index=True)
                 st.session_state['inventory'] = recalculate_inventory(st.session_state['history'], st.session_state['inventory'])
@@ -340,7 +343,6 @@ elif page == "🚚 銷售出貨 (業務/出貨)":
                 time.sleep(1)
                 st.rerun()
 
-    # 顯示出貨紀錄 (運費現在可見)
     df = st.session_state['history']
     if not df.empty:
         mask = df['單據類型'].isin(['銷售出貨', '製造領料'])
