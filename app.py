@@ -42,7 +42,6 @@ DEFAULT_KEYERS = ["Wen", "廠長", "倉管", "業務", "出貨人員"]
 # ==========================================
 
 def load_data():
-    """讀取 CSV 資料"""
     if os.path.exists(INVENTORY_FILE):
         try:
             inv_df = pd.read_csv(INVENTORY_FILE)
@@ -69,33 +68,36 @@ def load_data():
     return inv_df, hist_df
 
 def save_data():
-    """儲存 CSV 資料"""
     if 'inventory' in st.session_state:
         st.session_state['inventory'].to_csv(INVENTORY_FILE, index=False, encoding='utf-8-sig')
     if 'history' in st.session_state:
         st.session_state['history'].to_csv(HISTORY_FILE, index=False, encoding='utf-8-sig')
 
 def recalculate_inventory(hist_df, current_inv_df):
-    """
-    [核心邏輯] 根據流水帳重新計算庫存與均價
-    """
-    # 1. 準備商品清單 (從歷史紀錄中提取所有出現過的商品)
-    # 這樣即使上傳新的 Excel，也能自動建立新商品
-    if not hist_df.empty:
-        unique_items = hist_df[['貨號', '系列', '分類', '品名']].drop_duplicates(subset=['貨號']).copy()
-        # 補齊庫存欄位
-        for col in INVENTORY_COLUMNS:
-            if col not in unique_items.columns:
-                unique_items[col] = 0.0
-        new_inv = unique_items[INVENTORY_COLUMNS].reset_index(drop=True)
-    else:
-        new_inv = current_inv_df.copy()
-        # 重置數量
-        cols_reset = ['總庫存', '均價'] + [f'庫存_{w}' for w in WAREHOUSES]
-        for col in cols_reset:
-            new_inv[col] = 0.0
+    """重算庫存與移動平均成本"""
+    # 這裡我們要保留 current_inv_df 裡的商品資料 (因為可能剛匯入商品但還沒交易)
+    # 所以邏輯是：以 current_inv_df 為主體，去 history 找數量填入
     
-    # 2. 開始計算
+    new_inv = current_inv_df.copy()
+    
+    # 確保所有歷史紀錄中的商品都在庫存表裡 (防呆)
+    if not hist_df.empty:
+        hist_items = hist_df['貨號'].unique()
+        existing_items = new_inv['貨號'].unique()
+        new_items = [x for x in hist_items if x not in existing_items]
+        
+        # 如果歷史紀錄有新商品，加進去
+        if new_items:
+            temp_df = hist_df[hist_df['貨號'].isin(new_items)][['貨號','系列','分類','品名']].drop_duplicates('貨號')
+            for col in INVENTORY_COLUMNS:
+                if col not in temp_df.columns: temp_df[col] = 0
+            new_inv = pd.concat([new_inv, temp_df], ignore_index=True)
+
+    # 重置數量
+    cols_reset = ['總庫存', '均價'] + [f'庫存_{w}' for w in WAREHOUSES]
+    for col in cols_reset:
+        new_inv[col] = 0.0
+    
     for idx, row in new_inv.iterrows():
         sku = str(row['貨號'])
         target_hist = hist_df[hist_df['貨號'].astype(str) == sku]
@@ -111,14 +113,14 @@ def recalculate_inventory(hist_df, current_inv_df):
             w_name = str(h_row['倉庫'])
             if w_name not in WAREHOUSES: w_name = WAREHOUSES[0]
             
-            # 加項 (進貨/製造入庫)
+            # 加項
             if doc_type in ['進貨', '製造入庫', '調整入庫']:
                 if cost_total > 0:
                     total_value += cost_total
                 total_qty += qty
                 if w_name in w_stock: w_stock[w_name] += qty
             
-            # 減項 (出貨/領料)
+            # 減項
             elif doc_type in ['銷售出貨', '製造領料', '調整出庫']:
                 current_avg = (total_value / total_qty) if total_qty > 0 else 0
                 total_qty -= qty
@@ -144,53 +146,45 @@ def convert_to_excel_all_sheets(inv_df, hist_df):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         inv_df.to_excel(writer, index=False, sheet_name='庫存總表')
-        
         if '單據類型' in hist_df.columns:
             df_in = hist_df[hist_df['單據類型'] == '進貨']
             df_in.to_excel(writer, index=False, sheet_name='進貨紀錄')
-            
             df_mfg = hist_df[hist_df['單據類型'].str.contains('製造', na=False)]
             df_mfg.to_excel(writer, index=False, sheet_name='製造紀錄')
-            
             df_out = hist_df[hist_df['單據類型'].isin(['銷售出貨', '製造領料'])]
             df_out.to_excel(writer, index=False, sheet_name='出貨紀錄')
-        
         hist_df.to_excel(writer, index=False, sheet_name='完整流水帳')
     return output.getvalue()
 
-def process_upload(file_obj):
-    """處理上傳的 Excel"""
+def process_product_upload(file_obj):
+    """處理商品基本資料匯入"""
     try:
-        # 1. 讀取檔案
         if file_obj.name.endswith('.csv'):
-            df_raw = pd.read_csv(file_obj)
+            df = pd.read_csv(file_obj)
         else:
-            # 優先嘗試讀取 '完整流水帳' sheet，若無則讀第一個 sheet
-            xls = pd.ExcelFile(file_obj)
-            if '完整流水帳' in xls.sheet_names:
-                df_raw = pd.read_excel(file_obj, sheet_name='完整流水帳')
-            else:
-                df_raw = pd.read_excel(file_obj)
+            df = pd.read_excel(file_obj)
         
-        # 2. 欄位對應與補齊
-        # (這裡可以加入 rename_columns 的邏輯以相容舊格式)
-        for col in HISTORY_COLUMNS:
-            if col not in df_raw.columns:
-                df_raw[col] = "" if col not in ['數量', '進貨總成本'] else 0
+        # 欄位對應
+        rename_map = {'名稱': '品名', '商品名稱': '品名', '類別': '分類', 'SKU': '貨號'}
+        df = df.rename(columns=rename_map)
         
-        # 3. 轉型
-        df_raw['貨號'] = df_raw['貨號'].astype(str)
-        df_raw['數量'] = pd.to_numeric(df_raw['數量'], errors='coerce').fillna(0)
-        df_raw['進貨總成本'] = pd.to_numeric(df_raw['進貨總成本'], errors='coerce').fillna(0)
+        # 檢查必要欄位
+        if '貨號' not in df.columns or '品名' not in df.columns:
+            return None, "缺少必要欄位：'貨號' 或 '品名'"
+            
+        # 補齊其他欄位
+        target_cols = ['貨號', '系列', '分類', '品名']
+        for col in target_cols:
+            if col not in df.columns:
+                df[col] = "未分類" if col != '貨號' and col != '品名' else ""
+                
+        # 只取需要的欄位
+        new_products = df[target_cols].copy()
+        new_products['貨號'] = new_products['貨號'].astype(str)
         
-        # 4. 只取標準欄位
-        new_hist = df_raw[HISTORY_COLUMNS].copy()
-        
-        return new_hist
-        
+        return new_products, "OK"
     except Exception as e:
-        st.error(f"檔案讀取失敗: {e}")
-        return None
+        return None, str(e)
 
 # ==========================================
 # 3. 初始化
@@ -205,60 +199,134 @@ if 'inventory' not in st.session_state:
 # 4. 介面
 # ==========================================
 
-st.set_page_config(page_title=PAGE_TITLE, layout="wide", page_icon="🚚")
+st.set_page_config(page_title=PAGE_TITLE, layout="wide", page_icon="🏭")
 st.title(f"🏭 {PAGE_TITLE}")
 
 with st.sidebar:
     st.header("部門功能導航")
     page = st.radio("選擇作業", [
+        "📦 商品建檔與維護", # 將建檔移到第一個，符合初始流程
         "📥 進貨庫存 (無金額)", 
         "🔨 製造生產 (工廠)", 
         "🚚 銷售出貨 (業務/出貨)", 
-        "📦 商品建檔與維護",
         "💰 成本與財務管理 (加密)"
     ])
     
     st.divider()
-    st.header("💾 資料管理中心")
-    
-    # --- 下載功能 ---
     if not st.session_state['history'].empty:
+        st.caption("報表下載")
         excel_data = convert_to_excel_all_sheets(st.session_state['inventory'], st.session_state['history'])
         st.download_button(
-            label="📥 下載完整總表 (Excel)",
+            label="📥 下載完整四合一報表",
             data=excel_data,
             file_name=f'Report_{date.today()}.xlsx',
-            mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            help="包含庫存表、進貨、出貨、製造等所有分頁"
+            mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
         )
     
-    # --- 上傳功能 ---
-    with st.expander("📤 上傳報表 (還原/匯入)", expanded=False):
-        st.info("上傳 Excel 後，系統將根據「完整流水帳」重新計算庫存。")
-        up_file = st.file_uploader("選擇 Excel 檔案", type=['xlsx', 'xls', 'csv'])
-        
-        if up_file and st.button("確認匯入並重算庫存"):
-            new_hist = process_upload(up_file)
-            if new_hist is not None:
-                st.session_state['history'] = new_hist
-                # 關鍵：上傳後立即重算庫存
-                st.session_state['inventory'] = recalculate_inventory(new_hist, st.session_state['inventory'])
+    # 這裡保留完整的流水帳還原功能
+    with st.expander("⚙️ 系統還原 (上傳完整流水帳)", expanded=False):
+        st.caption("注意：這會覆蓋現有紀錄")
+        restore_file = st.file_uploader("上傳備份檔", type=['xlsx'], key='restore')
+        if restore_file and st.button("確認還原"):
+            # 這裡簡單重用之前的邏輯 (需確保有完整流水帳 sheet)
+            try:
+                df_res = pd.read_excel(restore_file, sheet_name='完整流水帳')
+                # 簡單清洗
+                for c in HISTORY_COLUMNS:
+                    if c not in df_res.columns: df_res[c] = ""
+                df_res['數量'] = pd.to_numeric(df_res['數量'], errors='coerce').fillna(0)
+                st.session_state['history'] = df_res
+                st.session_state['inventory'] = recalculate_inventory(df_res, st.session_state['inventory'])
                 save_data()
-                st.success(f"匯入成功！共 {len(new_hist)} 筆紀錄，庫存已更新。")
+                st.success("還原成功")
+                st.rerun()
+            except Exception as e:
+                st.error(f"還原失敗: {e}")
+
+# ---------------------------------------------------------
+# 頁面 1: 建檔
+# ---------------------------------------------------------
+if page == "📦 商品建檔與維護":
+    st.subheader("📦 商品資料庫管理")
+    
+    tab_single, tab_batch, tab_list = st.tabs(["✨ 單筆建檔", "📂 批次匯入 (Excel)", "📋 檢視商品清單"])
+    
+    # 單筆
+    with tab_single:
+        with st.form("new_p"):
+            c1, c2 = st.columns(2)
+            name = c1.text_input("品名")
+            sku = c2.text_input("貨號 (唯一)", value=f"P-{int(time.time())}")
+            cat = st.selectbox("分類", DEFAULT_CATEGORIES)
+            ser = st.selectbox("系列", DEFAULT_SERIES)
+            
+            if st.form_submit_button("建立新商品"):
+                if not name:
+                    st.error("請輸入品名")
+                else:
+                    new_row = {'貨號': sku, '系列': ser, '分類': cat, '品名': name, '總庫存': 0, '均價': 0}
+                    for w in WAREHOUSES: new_row[f'庫存_{w}'] = 0
+                    st.session_state['inventory'] = pd.concat([st.session_state['inventory'], pd.DataFrame([new_row])], ignore_index=True)
+                    save_data()
+                    st.success(f"已建立：{name}")
+    
+    # 批次匯入
+    with tab_batch:
+        st.info("請上傳包含 `貨號`、`品名`、`分類`、`系列` 欄位的 Excel 檔。這不會影響現有庫存數量，僅建立或更新商品基本資料。")
+        up_prod = st.file_uploader("選擇 Excel", type=['xlsx', 'xls', 'csv'], key='prod_up')
+        if up_prod and st.button("開始匯入商品資料"):
+            new_prods, msg = process_product_upload(up_prod)
+            if new_prods is None:
+                st.error(msg)
+            else:
+                # 邏輯：合併新資料與舊資料
+                # 1. 先把舊的 inventory 備份
+                old_inv = st.session_state['inventory'].copy()
+                
+                # 2. 針對每一筆新資料
+                count_new = 0
+                count_update = 0
+                
+                for _, row in new_prods.iterrows():
+                    sku = str(row['貨號'])
+                    # 檢查是否存在
+                    mask = old_inv['貨號'] == sku
+                    if mask.any():
+                        # 更新基本資料 (不改庫存)
+                        idx = old_inv[mask].index[0]
+                        old_inv.at[idx, '品名'] = row['品名']
+                        old_inv.at[idx, '分類'] = row['分類']
+                        old_inv.at[idx, '系列'] = row['系列']
+                        count_update += 1
+                    else:
+                        # 新增
+                        new_row = row.to_dict()
+                        new_row['總庫存'] = 0
+                        new_row['均價'] = 0
+                        for w in WAREHOUSES: new_row[f'庫存_{w}'] = 0
+                        old_inv = pd.concat([old_inv, pd.DataFrame([new_row])], ignore_index=True)
+                        count_new += 1
+                
+                st.session_state['inventory'] = old_inv
+                save_data()
+                st.success(f"匯入完成！新增 {count_new} 筆，更新 {count_update} 筆。")
                 time.sleep(1)
                 st.rerun()
 
+    with tab_list:
+        st.dataframe(get_safe_view(st.session_state['inventory']), use_container_width=True)
+
 # ---------------------------------------------------------
-# 頁面 1: 進貨 (一般員工用)
+# 頁面 2: 進貨
 # ---------------------------------------------------------
-if page == "📥 進貨庫存 (無金額)":
+elif page == "📥 進貨庫存 (無金額)":
     st.subheader("📥 進貨點收")
     st.info("進貨僅需輸入數量，金額由財務補登。")
     
     with st.expander("➕ 新增進貨單", expanded=True):
         inv_df = st.session_state['inventory']
         if inv_df.empty:
-            st.warning("請先建立商品")
+            st.warning("請先至「商品建檔」建立資料")
         else:
             inv_df['label'] = inv_df['貨號'] + " | " + inv_df['品名']
             c1, c2, c3 = st.columns([2, 1, 1])
@@ -294,7 +362,7 @@ if page == "📥 進貨庫存 (無金額)":
         st.dataframe(get_safe_view(df_view), use_container_width=True)
 
 # ---------------------------------------------------------
-# 頁面 2: 製造
+# 頁面 3: 製造
 # ---------------------------------------------------------
 elif page == "🔨 製造生產 (工廠)":
     st.subheader("🔨 製造生產紀錄")
@@ -359,7 +427,7 @@ elif page == "🔨 製造生產 (工廠)":
         st.dataframe(get_safe_view(df[mask]), use_container_width=True)
 
 # ---------------------------------------------------------
-# 頁面 3: 商品出貨表
+# 頁面 4: 出貨
 # ---------------------------------------------------------
 elif page == "🚚 銷售出貨 (業務/出貨)":
     st.subheader("🚚 出貨紀錄表")
@@ -396,7 +464,7 @@ elif page == "🚚 銷售出貨 (業務/出貨)":
                 st.session_state['history'] = pd.concat([st.session_state['history'], pd.DataFrame([rec])], ignore_index=True)
                 st.session_state['inventory'] = recalculate_inventory(st.session_state['history'], st.session_state['inventory'])
                 save_data()
-                st.success(f"出貨成功！(含運費 ${s_fee})")
+                st.success(f"出貨成功！")
                 time.sleep(1)
                 st.rerun()
 
@@ -406,30 +474,7 @@ elif page == "🚚 銷售出貨 (業務/出貨)":
         st.dataframe(get_safe_view(df[mask]), use_container_width=True)
 
 # ---------------------------------------------------------
-# 頁面 4: 建檔
-# ---------------------------------------------------------
-elif page == "📦 商品建檔與維護":
-    st.subheader("📦 商品資料庫")
-    with st.form("new_p"):
-        c1, c2 = st.columns(2)
-        name = c1.text_input("品名")
-        sku = c2.text_input("貨號", value=f"P-{int(time.time())}")
-        cat = st.selectbox("分類", DEFAULT_CATEGORIES)
-        ser = st.selectbox("系列", DEFAULT_SERIES)
-        
-        if st.form_submit_button("建檔"):
-            new_row = {'貨號': sku, '系列': ser, '分類': cat, '品名': name, '總庫存': 0, '均價': 0}
-            for w in WAREHOUSES: new_row[f'庫存_{w}'] = 0
-            st.session_state['inventory'] = pd.concat([st.session_state['inventory'], pd.DataFrame([new_row])], ignore_index=True)
-            save_data()
-            st.success("成功")
-            time.sleep(1)
-            st.rerun()
-    
-    st.dataframe(get_safe_view(st.session_state['inventory']))
-
-# ---------------------------------------------------------
-# 頁面 5: 財務 (加密)
+# 頁面 5: 財務
 # ---------------------------------------------------------
 elif page == "💰 成本與財務管理 (加密)":
     st.subheader("💰 成本與財務中心")
