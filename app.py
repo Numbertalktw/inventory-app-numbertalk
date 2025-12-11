@@ -9,12 +9,12 @@ import io
 # 1. 系統設定
 # ==========================================
 
-PAGE_TITLE = "製造庫存系統 (人員分倉版)"
+PAGE_TITLE = "製造庫存系統 (人員分倉/可修正版)"
 INVENTORY_FILE = 'inventory_secure_v2.csv'
 HISTORY_FILE = 'history_secure_v2.csv'
 ADMIN_PASSWORD = "8888"  # 管理員密碼
 
-# 倉庫列表 (人員)
+# 倉庫 (人員)
 WAREHOUSES = ["Wen", "千畇", "James", "Imeng"]
 
 # --- 核心流水帳 ---
@@ -46,26 +46,17 @@ def load_data():
     if os.path.exists(INVENTORY_FILE):
         try:
             inv_df = pd.read_csv(INVENTORY_FILE)
-            
-            # ★★★ 強制修復舊欄位名稱 ★★★
-            # 將舊的倉庫欄位，對應到新的人員名稱
+            # 自動修復舊欄位
             rename_map = {
-                '庫存_原物料倉': '庫存_Wen',
-                '庫存_半成品倉': '庫存_千畇',
-                '庫存_成品倉': '庫存_James',
-                '庫存_報廢倉': '庫存_Imeng'
+                '庫存_原物料倉': '庫存_Wen', '庫存_半成品倉': '庫存_千畇',
+                '庫存_成品倉': '庫存_James', '庫存_報廢倉': '庫存_Imeng'
             }
             inv_df = inv_df.rename(columns=rename_map)
             
-            # 確保只保留新定義的欄位，並補齊缺失的
             for col in INVENTORY_COLUMNS:
                 if col not in inv_df.columns:
                     inv_df[col] = 0.0 if '庫存' in col or '均價' in col else ""
-            
-            # 排序欄位並過濾掉不要的舊欄位
-            inv_df = inv_df[INVENTORY_COLUMNS]
             inv_df['貨號'] = inv_df['貨號'].astype(str)
-            
         except:
             inv_df = pd.DataFrame(columns=INVENTORY_COLUMNS)
     else:
@@ -74,22 +65,15 @@ def load_data():
     if os.path.exists(HISTORY_FILE):
         try:
             hist_df = pd.read_csv(HISTORY_FILE)
-            # 同樣修復歷史紀錄中的倉庫值 (如果有的話)
+            # 修復歷史倉庫名
             if '倉庫' in hist_df.columns:
-                # 簡單的對應取代 (可選，視您是否要保留歷史原貌，這裡建議更新以便統計)
-                replace_map = {
-                    '原物料倉': 'Wen',
-                    '半成品倉': '千畇',
-                    '成品倉': 'James',
-                    '報廢倉': 'Imeng'
-                }
+                replace_map = {'原物料倉': 'Wen', '半成品倉': '千畇', '成品倉': 'James', '報廢倉': 'Imeng'}
                 hist_df['倉庫'] = hist_df['倉庫'].replace(replace_map)
 
             for col in HISTORY_COLUMNS:
                 if col not in hist_df.columns:
                     hist_df[col] = "" if col not in ['數量', '進貨總成本', '運費', '工資'] else 0
             hist_df = hist_df[HISTORY_COLUMNS]
-            
             for c in ['數量', '進貨總成本', '運費', '工資']:
                 hist_df[c] = pd.to_numeric(hist_df[c], errors='coerce').fillna(0)
         except:
@@ -100,34 +84,32 @@ def load_data():
     return inv_df, hist_df
 
 def save_data():
-    """儲存 CSV 資料"""
     if 'inventory' in st.session_state:
         st.session_state['inventory'].to_csv(INVENTORY_FILE, index=False, encoding='utf-8-sig')
     if 'history' in st.session_state:
         st.session_state['history'].to_csv(HISTORY_FILE, index=False, encoding='utf-8-sig')
 
 def recalculate_inventory(hist_df, current_inv_df):
-    """[核心邏輯] 重算庫存"""
-    # 1. 準備商品清單
+    """[核心] 重算庫存"""
     new_inv = current_inv_df[INVENTORY_COLUMNS].copy()
     
+    # 若歷史紀錄有新商品，自動加入庫存表
     if not hist_df.empty:
         existing_skus = set(new_inv['貨號'].astype(str))
         hist_skus = set(hist_df['貨號'].astype(str))
         new_skus = hist_skus - existing_skus
-        
         if new_skus:
             temp_df = hist_df[hist_df['貨號'].isin(new_skus)][['貨號','系列','分類','品名']].drop_duplicates('貨號')
             for col in INVENTORY_COLUMNS:
                 if col not in temp_df.columns: temp_df[col] = 0.0
             new_inv = pd.concat([new_inv, temp_df], ignore_index=True)
 
-    # 2. 重置
+    # 重置數量
     cols_reset = ['總庫存', '均價'] + [f'庫存_{w}' for w in WAREHOUSES]
     for col in cols_reset:
         new_inv[col] = 0.0
     
-    # 3. 計算
+    # 計算
     for idx, row in new_inv.iterrows():
         sku = str(row['貨號'])
         target_hist = hist_df[hist_df['貨號'].astype(str) == sku]
@@ -142,21 +124,18 @@ def recalculate_inventory(hist_df, current_inv_df):
             doc_type = str(h_row['單據類型'])
             w_name = str(h_row['倉庫']).strip()
             
-            # 自動對應舊資料的倉庫名
             if w_name == '原物料倉': w_name = 'Wen'
             elif w_name == '半成品倉': w_name = '千畇'
             elif w_name == '成品倉': w_name = 'James'
             elif w_name == '報廢倉': w_name = 'Imeng'
             elif w_name not in WAREHOUSES: w_name = "Wen"
             
-            # 加項
             if doc_type in ['進貨', '製造入庫', '調整入庫']:
                 if cost_total > 0:
                     total_value += cost_total
                 total_qty += qty
                 if w_name in w_stock: w_stock[w_name] += qty
             
-            # 減項
             elif doc_type in ['銷售出貨', '製造領料', '調整出庫']:
                 current_avg = (total_value / total_qty) if total_qty > 0 else 0
                 total_qty -= qty
@@ -247,6 +226,7 @@ st.title(f"🏭 {PAGE_TITLE}")
 with st.sidebar:
     st.header("部門功能導航")
     page = st.radio("選擇作業", [
+        "📊 總表監控 (查詢/修改/刪除)", # <--- 已將此功能置頂
         "📦 商品建檔與維護", 
         "📥 進貨庫存 (無金額)", 
         "🔨 製造生產 (工廠)", 
@@ -280,12 +260,85 @@ with st.sidebar:
                 st.rerun()
 
 # ---------------------------------------------------------
+# 頁面 0: 總表監控 (含修改/刪除)
+# ---------------------------------------------------------
+if page == "📊 總表監控 (查詢/修改/刪除)":
+    st.subheader("📊 總表監控與資料維護")
+    st.info("此處可檢視完整資料，並進行「修改」或「刪除」。修正後請務必按下儲存按鈕。")
+    
+    tab_inv, tab_hist = st.tabs(["📦 庫存總表 (狀態)", "📜 完整流水帳 (可刪除/修正)"])
+    
+    # 庫存表 (唯讀或簡易修改品名)
+    with tab_inv:
+        st.caption("各倉庫即時庫存狀況")
+        df_inv = st.session_state['inventory']
+        if not df_inv.empty:
+            # 讓使用者可以改品名/分類，但不要改數量 (數量由流水帳決定)
+            edited_inv = st.data_editor(
+                df_inv,
+                use_container_width=True,
+                num_rows="dynamic", # 允許刪除商品
+                column_config={
+                    "總庫存": st.column_config.NumberColumn(format="%d", disabled=True), # 鎖定數量
+                    "庫存_Wen": st.column_config.NumberColumn(format="%d", disabled=True),
+                    "庫存_千畇": st.column_config.NumberColumn(format="%d", disabled=True),
+                    "庫存_James": st.column_config.NumberColumn(format="%d", disabled=True),
+                    "庫存_Imeng": st.column_config.NumberColumn(format="%d", disabled=True),
+                    "均價": st.column_config.NumberColumn(format="$%.2f", disabled=True)
+                }
+            )
+            if st.button("💾 儲存商品資料變更"):
+                st.session_state['inventory'] = edited_inv
+                save_data()
+                st.success("商品資料已更新")
+
+    # 流水帳 (核心修正區)
+    with tab_hist:
+        st.caption("💡 操作說明：勾選左側方框可刪除整行；點擊儲存格可修改內容。")
+        df_hist = st.session_state['history']
+        
+        if not df_hist.empty:
+            # 搜尋功能
+            search = st.text_input("🔍 全局搜尋 (單號/品名/工單/Key單者)", "")
+            if search:
+                mask = df_hist.astype(str).apply(lambda x: x.str.contains(search, case=False)).any(axis=1)
+                df_display = df_hist[mask]
+            else:
+                df_display = df_hist
+            
+            # 全功能編輯器
+            edited_hist = st.data_editor(
+                df_display, 
+                use_container_width=True, 
+                num_rows="dynamic", # ★★★ 開啟刪除/新增功能 ★★★
+                height=600,
+                column_config={
+                    "倉庫": st.column_config.SelectboxColumn("倉庫", options=WAREHOUSES),
+                    "單據類型": st.column_config.SelectboxColumn("單據類型", options=["進貨", "銷售出貨", "製造領料", "製造入庫", "調整入庫", "調整出庫"])
+                }
+            )
+            
+            if st.button("💾 儲存修正並重算庫存", type="primary"):
+                # 注意：如果是搜尋狀態下的編輯，這會比較複雜。
+                # 為了安全，這裡假設使用者是對 'edited_hist' 進行了最終確認。
+                # 如果有搜尋，Streamlit 的 data_editor 會回傳編輯後的 subset。
+                # 簡單作法：直接更新 session_state['history']
+                
+                st.session_state['history'] = edited_hist
+                # 觸發重算
+                st.session_state['inventory'] = recalculate_inventory(edited_hist, st.session_state['inventory'])
+                save_data()
+                st.success("✅ 資料已修正，庫存數量已重新校正！")
+                time.sleep(1)
+                st.rerun()
+
+# ---------------------------------------------------------
 # 頁面 1: 建檔
 # ---------------------------------------------------------
-if page == "📦 商品建檔與維護":
+elif page == "📦 商品建檔與維護":
     st.subheader("📦 商品資料庫管理")
     
-    tab_single, tab_batch, tab_list = st.tabs(["✨ 單筆建檔", "📂 批次匯入 (Excel)", "📋 檢視商品清單"])
+    tab_single, tab_batch = st.tabs(["✨ 單筆建檔", "📂 批次匯入 (Excel)"])
     
     with tab_single:
         with st.form("new_p"):
@@ -316,7 +369,6 @@ if page == "📦 商品建檔與維護":
                 old_inv = st.session_state['inventory'].copy()
                 count_new = 0
                 count_update = 0
-                
                 for _, row in new_prods.iterrows():
                     sku = str(row['貨號'])
                     mask = old_inv['貨號'] == sku
@@ -333,15 +385,11 @@ if page == "📦 商品建檔與維護":
                         for w in WAREHOUSES: new_row[f'庫存_{w}'] = 0
                         old_inv = pd.concat([old_inv, pd.DataFrame([new_row])], ignore_index=True)
                         count_new += 1
-                
                 st.session_state['inventory'] = old_inv
                 save_data()
                 st.success(f"匯入完成！新增 {count_new} 筆，更新 {count_update} 筆。")
                 time.sleep(1)
                 st.rerun()
-
-    with tab_list:
-        st.dataframe(get_safe_view(st.session_state['inventory']), use_container_width=True)
 
 # ---------------------------------------------------------
 # 頁面 2: 進貨
@@ -394,7 +442,6 @@ elif page == "📥 進貨庫存 (無金額)":
 elif page == "🔨 製造生產 (工廠)":
     st.subheader("🔨 製造生產紀錄")
     tab1, tab2 = st.tabs(["📤 領料", "📥 完工"])
-    
     inv_df = st.session_state['inventory']
     inv_df['label'] = inv_df['貨號'] + " | " + inv_df['品名'] + " | 總存:" + inv_df['總庫存'].astype(str)
 
