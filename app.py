@@ -9,13 +9,13 @@ import io
 # 1. 系統設定
 # ==========================================
 
-PAGE_TITLE = "製造庫存系統"
+PAGE_TITLE = "製造庫存系統 (分倉版)"
 INVENTORY_FILE = 'inventory_secure_v2.csv'
 HISTORY_FILE = 'history_secure_v2.csv'
 ADMIN_PASSWORD = "8888"  # 管理員密碼
 
-# 定義倉庫
-WAREHOUSES = ["原物料倉", "半成品倉", "成品倉", "報廢倉"]
+# ★★★ 修改處：倉庫已更新為指定名稱 ★★★
+WAREHOUSES = ["Wen", "千畇", "James", "Imeng"]
 
 # --- 核心流水帳 ---
 HISTORY_COLUMNS = [
@@ -26,22 +26,23 @@ HISTORY_COLUMNS = [
     '進貨總成本' 
 ]
 
-# --- 庫存狀態表 ---
+# --- 庫存狀態表 (自動對應新倉庫) ---
 INVENTORY_COLUMNS = [
     '貨號', '系列', '分類', '品名', 
     '總庫存', '均價', 
-    '庫存_原物料倉', '庫存_半成品倉', '庫存_成品倉', '庫存_報廢倉'
+    '庫存_Wen', '庫存_千畇', '庫存_James', '庫存_Imeng'
 ]
 
 DEFAULT_SERIES = ["原料", "半成品", "成品", "包材"]
 DEFAULT_CATEGORIES = ["天然石", "金屬配件", "線材", "包裝盒", "完成品"]
-DEFAULT_KEYERS = ["Wen", "廠長", "倉管", "業務", "出貨人員"]
+DEFAULT_KEYERS = ["Wen", "千畇", "James", "Imeng", "小幫手"] # Key單者也建議包含這些人
 
 # ==========================================
 # 2. 核心函式
 # ==========================================
 
 def load_data():
+    """讀取 CSV 資料"""
     if os.path.exists(INVENTORY_FILE):
         try:
             inv_df = pd.read_csv(INVENTORY_FILE)
@@ -68,42 +69,39 @@ def load_data():
     return inv_df, hist_df
 
 def save_data():
+    """儲存 CSV 資料"""
     if 'inventory' in st.session_state:
         st.session_state['inventory'].to_csv(INVENTORY_FILE, index=False, encoding='utf-8-sig')
     if 'history' in st.session_state:
         st.session_state['history'].to_csv(HISTORY_FILE, index=False, encoding='utf-8-sig')
 
 def recalculate_inventory(hist_df, current_inv_df):
-    """重算庫存與移動平均成本"""
-    # 這裡我們要保留 current_inv_df 裡的商品資料 (因為可能剛匯入商品但還沒交易)
-    # 所以邏輯是：以 current_inv_df 為主體，去 history 找數量填入
-    
-    new_inv = current_inv_df.copy()
-    
-    # 確保所有歷史紀錄中的商品都在庫存表裡 (防呆)
+    """
+    [核心邏輯] 根據流水帳重新計算庫存與均價
+    """
+    # 1. 準備商品清單 (從歷史紀錄中提取所有出現過的商品)
     if not hist_df.empty:
-        hist_items = hist_df['貨號'].unique()
-        existing_items = new_inv['貨號'].unique()
-        new_items = [x for x in hist_items if x not in existing_items]
-        
-        # 如果歷史紀錄有新商品，加進去
-        if new_items:
-            temp_df = hist_df[hist_df['貨號'].isin(new_items)][['貨號','系列','分類','品名']].drop_duplicates('貨號')
-            for col in INVENTORY_COLUMNS:
-                if col not in temp_df.columns: temp_df[col] = 0
-            new_inv = pd.concat([new_inv, temp_df], ignore_index=True)
-
-    # 重置數量
-    cols_reset = ['總庫存', '均價'] + [f'庫存_{w}' for w in WAREHOUSES]
-    for col in cols_reset:
-        new_inv[col] = 0.0
+        unique_items = hist_df[['貨號', '系列', '分類', '品名']].drop_duplicates(subset=['貨號']).copy()
+        # 補齊庫存欄位
+        for col in INVENTORY_COLUMNS:
+            if col not in unique_items.columns:
+                unique_items[col] = 0.0
+        new_inv = unique_items[INVENTORY_COLUMNS].reset_index(drop=True)
+    else:
+        # 若無歷史紀錄，則沿用當前商品清單，但重置數量
+        new_inv = current_inv_df[INVENTORY_COLUMNS].copy() # 確保欄位正確
+        cols_reset = ['總庫存', '均價'] + [f'庫存_{w}' for w in WAREHOUSES]
+        for col in cols_reset:
+            new_inv[col] = 0.0
     
+    # 2. 開始計算
     for idx, row in new_inv.iterrows():
         sku = str(row['貨號'])
         target_hist = hist_df[hist_df['貨號'].astype(str) == sku]
         
         total_qty = 0
         total_value = 0.0
+        # 初始化各倉數量
         w_stock = {w: 0 for w in WAREHOUSES}
         
         for _, h_row in target_hist.iterrows():
@@ -111,16 +109,18 @@ def recalculate_inventory(hist_df, current_inv_df):
             cost_total = float(h_row['進貨總成本'])
             doc_type = str(h_row['單據類型'])
             w_name = str(h_row['倉庫'])
+            
+            # 若紀錄中的倉庫不在現有清單中(例如舊資料)，歸類到第一個
             if w_name not in WAREHOUSES: w_name = WAREHOUSES[0]
             
-            # 加項
+            # 加項 (進貨/製造入庫)
             if doc_type in ['進貨', '製造入庫', '調整入庫']:
                 if cost_total > 0:
                     total_value += cost_total
                 total_qty += qty
                 if w_name in w_stock: w_stock[w_name] += qty
             
-            # 減項
+            # 減項 (出貨/領料)
             elif doc_type in ['銷售出貨', '製造領料', '調整出庫']:
                 current_avg = (total_value / total_qty) if total_qty > 0 else 0
                 total_qty -= qty
@@ -164,27 +164,37 @@ def process_product_upload(file_obj):
         else:
             df = pd.read_excel(file_obj)
         
-        # 欄位對應
         rename_map = {'名稱': '品名', '商品名稱': '品名', '類別': '分類', 'SKU': '貨號'}
         df = df.rename(columns=rename_map)
         
-        # 檢查必要欄位
         if '貨號' not in df.columns or '品名' not in df.columns:
             return None, "缺少必要欄位：'貨號' 或 '品名'"
             
-        # 補齊其他欄位
         target_cols = ['貨號', '系列', '分類', '品名']
         for col in target_cols:
             if col not in df.columns:
                 df[col] = "未分類" if col != '貨號' and col != '品名' else ""
                 
-        # 只取需要的欄位
         new_products = df[target_cols].copy()
         new_products['貨號'] = new_products['貨號'].astype(str)
         
         return new_products, "OK"
     except Exception as e:
         return None, str(e)
+
+def process_restore_upload(file_obj):
+    """處理完整流水帳還原"""
+    try:
+        df_res = pd.read_excel(file_obj, sheet_name='完整流水帳')
+        # 簡單清洗
+        for c in HISTORY_COLUMNS:
+            if c not in df_res.columns: df_res[c] = ""
+        df_res['數量'] = pd.to_numeric(df_res['數量'], errors='coerce').fillna(0)
+        df_res['進貨總成本'] = pd.to_numeric(df_res['進貨總成本'], errors='coerce').fillna(0)
+        return df_res
+    except Exception as e:
+        st.error(f"還原失敗: {e}")
+        return None
 
 # ==========================================
 # 3. 初始化
@@ -205,7 +215,7 @@ st.title(f"🏭 {PAGE_TITLE}")
 with st.sidebar:
     st.header("部門功能導航")
     page = st.radio("選擇作業", [
-        "📦 商品建檔與維護", # 將建檔移到第一個，符合初始流程
+        "📦 商品建檔與維護", 
         "📥 進貨庫存 (無金額)", 
         "🔨 製造生產 (工廠)", 
         "🚚 銷售出貨 (業務/出貨)", 
@@ -213,8 +223,10 @@ with st.sidebar:
     ])
     
     st.divider()
+    st.markdown("### 💾 資料管理")
+    
+    # 下載
     if not st.session_state['history'].empty:
-        st.caption("報表下載")
         excel_data = convert_to_excel_all_sheets(st.session_state['inventory'], st.session_state['history'])
         st.download_button(
             label="📥 下載完整四合一報表",
@@ -223,25 +235,19 @@ with st.sidebar:
             mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
         )
     
-    # 這裡保留完整的流水帳還原功能
-    with st.expander("⚙️ 系統還原 (上傳完整流水帳)", expanded=False):
-        st.caption("注意：這會覆蓋現有紀錄")
+    # 還原功能 (移到這裡方便操作)
+    with st.expander("⚙️ 系統還原 (上傳備份)", expanded=False):
+        st.caption("請上傳包含「完整流水帳」分頁的 Excel")
         restore_file = st.file_uploader("上傳備份檔", type=['xlsx'], key='restore')
-        if restore_file and st.button("確認還原"):
-            # 這裡簡單重用之前的邏輯 (需確保有完整流水帳 sheet)
-            try:
-                df_res = pd.read_excel(restore_file, sheet_name='完整流水帳')
-                # 簡單清洗
-                for c in HISTORY_COLUMNS:
-                    if c not in df_res.columns: df_res[c] = ""
-                df_res['數量'] = pd.to_numeric(df_res['數量'], errors='coerce').fillna(0)
-                st.session_state['history'] = df_res
-                st.session_state['inventory'] = recalculate_inventory(df_res, st.session_state['inventory'])
+        if restore_file and st.button("確認還原並重算"):
+            df_new_hist = process_restore_upload(restore_file)
+            if df_new_hist is not None:
+                st.session_state['history'] = df_new_hist
+                st.session_state['inventory'] = recalculate_inventory(df_new_hist, st.session_state['inventory'])
                 save_data()
-                st.success("還原成功")
+                st.success("還原成功！庫存已重新計算。")
+                time.sleep(1)
                 st.rerun()
-            except Exception as e:
-                st.error(f"還原失敗: {e}")
 
 # ---------------------------------------------------------
 # 頁面 1: 建檔
@@ -272,34 +278,27 @@ if page == "📦 商品建檔與維護":
     
     # 批次匯入
     with tab_batch:
-        st.info("請上傳包含 `貨號`、`品名`、`分類`、`系列` 欄位的 Excel 檔。這不會影響現有庫存數量，僅建立或更新商品基本資料。")
+        st.info("Excel 需包含：`貨號`、`品名` (選填：`分類`、`系列`)")
         up_prod = st.file_uploader("選擇 Excel", type=['xlsx', 'xls', 'csv'], key='prod_up')
-        if up_prod and st.button("開始匯入商品資料"):
+        if up_prod and st.button("開始匯入"):
             new_prods, msg = process_product_upload(up_prod)
             if new_prods is None:
                 st.error(msg)
             else:
-                # 邏輯：合併新資料與舊資料
-                # 1. 先把舊的 inventory 備份
                 old_inv = st.session_state['inventory'].copy()
-                
-                # 2. 針對每一筆新資料
                 count_new = 0
                 count_update = 0
                 
                 for _, row in new_prods.iterrows():
                     sku = str(row['貨號'])
-                    # 檢查是否存在
                     mask = old_inv['貨號'] == sku
                     if mask.any():
-                        # 更新基本資料 (不改庫存)
                         idx = old_inv[mask].index[0]
                         old_inv.at[idx, '品名'] = row['品名']
                         old_inv.at[idx, '分類'] = row['分類']
                         old_inv.at[idx, '系列'] = row['系列']
                         count_update += 1
                     else:
-                        # 新增
                         new_row = row.to_dict()
                         new_row['總庫存'] = 0
                         new_row['均價'] = 0
@@ -331,7 +330,7 @@ elif page == "📥 進貨庫存 (無金額)":
             inv_df['label'] = inv_df['貨號'] + " | " + inv_df['品名']
             c1, c2, c3 = st.columns([2, 1, 1])
             p_sel = c1.selectbox("進貨商品", inv_df['label'].tolist())
-            p_wh = c2.selectbox("入庫倉庫", WAREHOUSES, index=0)
+            p_wh = c2.selectbox("入庫倉庫", WAREHOUSES, index=0) # 預設第一個
             p_qty = c3.number_input("進貨數量", 1)
             
             c4, c5 = st.columns(2)
@@ -369,13 +368,13 @@ elif page == "🔨 製造生產 (工廠)":
     tab1, tab2 = st.tabs(["📤 領料", "📥 完工"])
     
     inv_df = st.session_state['inventory']
-    inv_df['label'] = inv_df['貨號'] + " | " + inv_df['品名'] + " | 總存:" + inv_df['總庫存'].astype(str)
+    inv_df['label'] = inv_df['貨號'] + " | " + inv_df['品名']
 
     with tab1:
         with st.form("mfg_out"):
             c1, c2 = st.columns([2, 1])
             m_sel = c1.selectbox("原料", inv_df['label'].tolist())
-            m_wh = c2.selectbox("從哪領", WAREHOUSES, index=0)
+            m_wh = c2.selectbox("從哪領", WAREHOUSES, index=0) # 預設Wen
             m_qty = st.number_input("領用量", 1)
             m_user = st.selectbox("領料人", DEFAULT_KEYERS)
             m_mo = st.text_input("工單單號")
@@ -400,7 +399,7 @@ elif page == "🔨 製造生產 (工廠)":
         with st.form("mfg_in"):
             c1, c2 = st.columns([2, 1])
             f_sel = c1.selectbox("成品", inv_df['label'].tolist())
-            f_wh = c2.selectbox("入庫至", WAREHOUSES, index=2)
+            f_wh = c2.selectbox("入庫至", WAREHOUSES, index=1) # 預設千畇(半成品) or James(成品)
             f_qty = st.number_input("產出量", 1)
             f_batch = st.text_input("成品批號", value=gen_batch_number("PD"))
             f_mo = st.text_input("工單單號")
@@ -434,12 +433,12 @@ elif page == "🚚 銷售出貨 (業務/出貨)":
     
     with st.expander("➖ 新增銷售出貨單", expanded=True):
         inv_df = st.session_state['inventory']
-        inv_df['label'] = inv_df['貨號'] + " | " + inv_df['品名'] + " | 庫存:" + inv_df['庫存_成品倉'].astype(str)
+        inv_df['label'] = inv_df['貨號'] + " | " + inv_df['品名']
         
         with st.form("sales"):
             c1, c2 = st.columns([2, 1])
             s_sel = c1.selectbox("商品", inv_df['label'].tolist())
-            s_wh = c2.selectbox("出貨倉", WAREHOUSES, index=2)
+            s_wh = c2.selectbox("出貨倉", WAREHOUSES, index=2) # 預設James
             
             c3, c4, c5 = st.columns(3)
             s_qty = c3.number_input("數量", 1)
