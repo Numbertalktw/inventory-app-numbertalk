@@ -55,62 +55,91 @@ PREFIX_MAP = {
 # ==========================================
 
 def filter_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    """通用篩選器 UI 元件"""
+    """
+    通用篩選器 UI 元件 (含全選功能)
+    """
     modify = st.checkbox("🔍 開啟資料篩選器 (Filter Data)")
+
     if not modify:
         return df
+
     df = df.copy()
+
+    # 嘗試轉換日期欄位格式
     for col in df.columns:
         if is_object_dtype(df[col]):
             try:
                 df[col] = pd.to_datetime(df[col])
             except Exception:
                 pass
+
     modification_container = st.container()
+
     with modification_container:
         to_filter_columns = st.multiselect("選擇要篩選的欄位", df.columns)
+        
         for column in to_filter_columns:
             left, right = st.columns((1, 20))
             left.write("↳")
-            if is_categorical_dtype(df[column]) or df[column].nunique() < 30:
+            
+            # 處理各種資料類型的篩選邏輯
+            # 1. 選項類 (文字/分類)
+            if is_categorical_dtype(df[column]) or df[column].nunique() < 50:
                 options = sorted(df[column].astype(str).unique().tolist())
+                
+                # 全選功能
                 use_all = right.checkbox(f"全選 (Select All) - {column}", value=True, key=f"chk_{column}")
+                
                 if use_all:
                     user_cat_input = options
                     right.caption(f"✅ 已顯示所有內容 ({len(options)} 項)")
                 else:
-                    user_cat_input = right.multiselect(f"請選擇 {column} 的內容", options, default=[])
+                    user_cat_input = right.multiselect(
+                        f"請選擇 {column} 的內容",
+                        options,
+                        default=[] 
+                    )
+                
                 if user_cat_input:
                     df = df[df[column].astype(str).isin(user_cat_input)]
                 else:
-                    if not use_all:
+                    if not use_all: # 如果取消全選且沒選任何項目，顯示空
                         df = df[df[column].astype(str).isin([])]
+                
+            # 2. 數字類
             elif is_numeric_dtype(df[column]):
                 _min = float(df[column].min())
                 _max = float(df[column].max())
                 step = (_max - _min) / 100
-                user_num_input = right.slider(f"設定 {column} 的範圍", min_value=_min, max_value=_max, value=(_min, _max), step=step)
+                user_num_input = right.slider(
+                    f"設定 {column} 的範圍",
+                    min_value=_min,
+                    max_value=_max,
+                    value=(_min, _max),
+                    step=step,
+                )
                 df = df[df[column].between(*user_num_input)]
+                
+            # 3. 日期類
             elif is_datetime64_any_dtype(df[column]):
-                user_date_input = right.date_input(f"選擇 {column} 的範圍", value=(df[column].min(), df[column].max()))
+                user_date_input = right.date_input(
+                    f"選擇 {column} 的範圍",
+                    value=(df[column].min(), df[column].max()),
+                )
                 if len(user_date_input) == 2:
                     user_date_input = tuple(map(pd.to_datetime, user_date_input))
                     start_date, end_date = user_date_input
                     df = df.loc[df[column] >= start_date]
                     df = df.loc[df[column] <= end_date]
+                    
+            # 4. 其他文字 (搜尋)
             else:
-                user_text_input = right.text_input(f"搜尋 {column} 包含的字串")
+                user_text_input = right.text_input(
+                    f"搜尋 {column} 包含的字串",
+                )
                 if user_text_input:
                     df = df[df[column].astype(str).str.contains(user_text_input, case=False)]
-    return df
 
-def sort_inventory(df):
-    """★ 新增：自動排序函式 (系列 -> 分類 -> 貨號)"""
-    if df.empty: return df
-    # 確保這些欄位存在
-    sort_cols = [c for c in ['系列', '分類', '貨號'] if c in df.columns]
-    if sort_cols:
-        return df.sort_values(by=sort_cols, ascending=[True, True, True]).reset_index(drop=True)
     return df
 
 def load_data():
@@ -127,10 +156,6 @@ def load_data():
                 if col not in inv_df.columns:
                     inv_df[col] = 0.0 if '庫存' in col or '均價' in col else ""
             inv_df['貨號'] = inv_df['貨號'].astype(str)
-            
-            # ★ 載入時自動排序
-            inv_df = sort_inventory(inv_df)
-            
         except:
             inv_df = pd.DataFrame(columns=INVENTORY_COLUMNS)
     else:
@@ -148,12 +173,6 @@ def load_data():
             hist_df = hist_df[HISTORY_COLUMNS]
             for c in ['數量', '進貨總成本', '運費', '工資']:
                 hist_df[c] = pd.to_numeric(hist_df[c], errors='coerce').fillna(0)
-            
-            # 歷史紀錄按日期降序 (新的在上面)
-            if '日期' in hist_df.columns:
-                hist_df['日期'] = pd.to_datetime(hist_df['日期'], errors='coerce')
-                hist_df = hist_df.sort_values(by=['日期', '單號'], ascending=[False, False]).reset_index(drop=True)
-                
         except:
             hist_df = pd.DataFrame(columns=HISTORY_COLUMNS)
     else:
@@ -163,9 +182,7 @@ def load_data():
 
 def save_data():
     if 'inventory' in st.session_state:
-        # ★ 存檔前再排序一次，確保 CSV 整齊
-        sorted_inv = sort_inventory(st.session_state['inventory'])
-        sorted_inv.to_csv(INVENTORY_FILE, index=False, encoding='utf-8-sig')
+        st.session_state['inventory'].to_csv(INVENTORY_FILE, index=False, encoding='utf-8-sig')
     if 'history' in st.session_state:
         st.session_state['history'].to_csv(HISTORY_FILE, index=False, encoding='utf-8-sig')
 
@@ -216,8 +233,7 @@ def recalculate_inventory(hist_df, current_inv_df):
         for w in WAREHOUSES:
             new_inv.at[idx, f'庫存_{w}'] = w_stock[w]
             
-    # ★ 計算完自動排序
-    return sort_inventory(new_inv)
+    return new_inv
 
 def gen_batch_number(prefix="BAT"):
     return f"{prefix}-{datetime.now().strftime('%y%m%d%H%M')}"
@@ -464,8 +480,6 @@ if page == "📦 商品建檔與維護":
                     new_row = {'貨號': sku, '系列': final_ser, '分類': final_cat, '品名': name, '總庫存': 0, '均價': 0}
                     for w in WAREHOUSES: new_row[f'庫存_{w}'] = 0
                     st.session_state['inventory'] = pd.concat([st.session_state['inventory'], pd.DataFrame([new_row])], ignore_index=True)
-                    # ★ 建立新商品後，自動排序
-                    st.session_state['inventory'] = sort_inventory(st.session_state['inventory'])
                     save_data()
                     st.success(f"✅ 已建立：{name} ({sku})")
                     time.sleep(1)
@@ -494,8 +508,7 @@ if page == "📦 商品建檔與維護":
                         new_row['均價'] = 0
                         for w in WAREHOUSES: new_row[f'庫存_{w}'] = 0
                         old_inv = pd.concat([old_inv, pd.DataFrame([new_row])], ignore_index=True)
-                # ★ 匯入後，自動排序
-                st.session_state['inventory'] = sort_inventory(old_inv)
+                st.session_state['inventory'] = old_inv
                 save_data()
                 st.success("匯入完成！")
                 time.sleep(1)
@@ -544,9 +557,7 @@ if page == "📦 商品建檔與維護":
                     current_inv.at[idx, '品名'] = row['品名']
                     current_inv.at[idx, '分類'] = row['分類']
                     current_inv.at[idx, '系列'] = row['系列']
-            
-            # ★ 存檔時，自動排序
-            st.session_state['inventory'] = sort_inventory(current_inv)
+            st.session_state['inventory'] = current_inv
             save_data()
             st.success("✅ 商品資料已更新！")
 
@@ -579,13 +590,11 @@ elif page == "⚖️ 庫存盤點與調整":
             
             if st.form_submit_button("✅ 確認修正庫存"):
                 diff = new_qty - curr_qty
-                
                 if diff == 0:
                     st.warning("數量未變動，無需調整。")
                 else:
                     action = "庫存調整(加)" if diff > 0 else "庫存調整(減)"
                     final_qty = abs(diff) 
-                    
                     rec = {
                         '單據類型': action,
                         '單號': f"ADJ-{int(time.time())}",
@@ -597,7 +606,10 @@ elif page == "⚖️ 庫存盤點與調整":
                         'Key單者': '盤點調整',
                         '備註': f"{adj_reason} (原:{int(curr_qty)} -> 新:{int(new_qty)})"
                     }
-                    
+                    # 補齊其他可能缺失的欄位
+                    for c in HISTORY_COLUMNS:
+                        if c not in rec: rec[c] = ""
+                        
                     st.session_state['history'] = pd.concat([st.session_state['history'], pd.DataFrame([rec])], ignore_index=True)
                     st.session_state['inventory'] = recalculate_inventory(st.session_state['history'], st.session_state['inventory'])
                     save_data()
@@ -753,4 +765,105 @@ elif page == "🚚 銷售出貨 (業務/出貨)":
                     '單號': datetime.now().strftime('%Y%m%d%H%M%S'),
                     '日期': s_date, '系列': s_row['系列'], '分類': s_row['分類'], 
                     '品名': s_row['品名'], '貨號': s_row['貨號'], '批號': '',
-                    '倉庫': s_wh, '數量': s
+                    '倉庫': s_wh, '數量': s_qty, 'Key單者': s_user, 
+                    '訂單單號': s_ord, '運費': s_fee, '備註': s_note
+                }
+                st.session_state['history'] = pd.concat([st.session_state['history'], pd.DataFrame([rec])], ignore_index=True)
+                st.session_state['inventory'] = recalculate_inventory(st.session_state['history'], st.session_state['inventory'])
+                save_data()
+                st.success(f"出貨成功！")
+                time.sleep(1)
+                st.rerun()
+
+    df = st.session_state['history']
+    if not df.empty:
+        mask = df['單據類型'].isin(['銷售出貨', '製造領料'])
+        df_view = df[mask].copy()
+        sales_cols = ['單號', '訂單單號', '出貨日期', '系列', '分類', '品名', '貨號', '倉庫', '數量', '運費', 'Key單者', '備註']
+        valid_cols = [c for c in sales_cols if c in df_view.columns]
+        
+        st.write("---")
+        df_filtered = filter_dataframe(df_view[valid_cols])
+        st.dataframe(df_filtered, use_container_width=True)
+
+# ---------------------------------------------------------
+# 頁面 0: 總表監控 (主管專用)
+# ---------------------------------------------------------
+elif page == "📊 總表監控 (主管專用)":
+    st.subheader("📊 總表監控與資料維護")
+    st.info("此區僅供主管進入，進行資料修改或刪除。")
+    pwd = st.text_input("🔒 請輸入主管密碼", type="password", key="admin_pwd")
+    if pwd == ADMIN_PASSWORD:
+        st.success("✅ 驗證成功")
+        tab_inv, tab_hist = st.tabs(["📦 庫存總表 (狀態)", "📜 完整流水帳 (可刪除/修正)"])
+        
+        with tab_inv:
+            df_inv = st.session_state['inventory']
+            if not df_inv.empty:
+                df_filtered_inv = filter_dataframe(df_inv)
+                
+                edited_inv = st.data_editor(
+                    df_filtered_inv, use_container_width=True, num_rows="dynamic",
+                    column_config={"總庫存": st.column_config.NumberColumn(disabled=True)}
+                )
+                if st.button("💾 儲存商品資料變更"):
+                    st.session_state['inventory'] = edited_inv
+                    save_data()
+                    st.success("商品資料已更新")
+
+        with tab_hist:
+            df_hist = st.session_state['history']
+            if not df_hist.empty:
+                df_filtered_hist = filter_dataframe(df_hist)
+                
+                edited_hist = st.data_editor(
+                    df_filtered_hist, use_container_width=True, num_rows="dynamic", height=600,
+                    column_config={
+                        "倉庫": st.column_config.SelectboxColumn("倉庫", options=WAREHOUSES),
+                        "單據類型": st.column_config.SelectboxColumn("單據類型", options=["進貨", "銷售出貨", "製造領料", "製造入庫", "期初建檔", "庫存調整(加)", "庫存調整(減)"])
+                    }
+                )
+                
+                if st.button("💾 儲存修正並重算"):
+                    st.session_state['history'] = edited_hist
+                    st.session_state['inventory'] = recalculate_inventory(edited_hist, st.session_state['inventory'])
+                    save_data()
+                    st.success("已修正")
+    elif pwd != "":
+        st.error("密碼錯誤")
+
+# ---------------------------------------------------------
+# 頁面 5: 財務
+# ---------------------------------------------------------
+elif page == "💰 成本與財務管理 (加密)":
+    st.subheader("💰 成本與財務中心")
+    pwd = st.text_input("請輸入管理員密碼", type="password")
+    
+    if pwd == ADMIN_PASSWORD:
+        st.success("身分驗證成功")
+        tab_fix, tab_full = st.tabs(["💸 補登進貨成本", "📜 完整流水帳 (含金額)"])
+        
+        with tab_fix:
+            df = st.session_state['history']
+            mask = (df['單據類型'] == '進貨') & (df['進貨總成本'] == 0)
+            df_fix = df[mask].copy()
+            if df_fix.empty:
+                st.info("✅ 無待補登單據")
+            else:
+                df_fix_filtered = filter_dataframe(df_fix)
+                edited = st.data_editor(df_fix_filtered, column_config={"進貨總成本": st.column_config.NumberColumn(required=True)})
+                if st.button("💾 儲存"):
+                    df.update(edited)
+                    st.session_state['history'] = df
+                    st.session_state['inventory'] = recalculate_inventory(df, st.session_state['inventory'])
+                    save_data()
+                    st.success("已更新")
+
+        with tab_full:
+            df_all_filtered = filter_dataframe(st.session_state['history'])
+            edited_all = st.data_editor(df_all_filtered, use_container_width=True, num_rows="dynamic")
+            if st.button("💾 儲存修正"):
+                st.session_state['history'] = edited_all
+                st.session_state['inventory'] = recalculate_inventory(edited_all, st.session_state['inventory'])
+                save_data()
+                st.success("已更新")
