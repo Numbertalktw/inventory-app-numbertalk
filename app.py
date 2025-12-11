@@ -9,7 +9,6 @@ import io
 # 1. 系統設定
 # ==========================================
 
-# ★★★ 修改 1：標題已移除後方括號文字 ★★★
 PAGE_TITLE = "製造庫存系統" 
 
 INVENTORY_FILE = 'inventory_secure_v2.csv'
@@ -142,11 +141,9 @@ def recalculate_inventory(hist_df, current_inv_df):
     return new_inv
 
 def gen_batch_number(prefix="BAT"):
-    """自動產生批號"""
     return f"{prefix}-{datetime.now().strftime('%y%m%d%H%M')}"
 
 def gen_mo_number():
-    """★ 修改 2：自動產生工單單號 (MO + 年月日 + 時間)"""
     return f"MO-{datetime.now().strftime('%y%m%d-%H%M')}"
 
 def get_safe_view(df):
@@ -293,7 +290,7 @@ if page == "📦 商品建檔與維護":
         name = st.text_input("商品品名")
         
         auto_sku = auto_generate_sku(final_cat) if final_cat else ""
-        sku = st.text_input("商品貨號 (預設自動產生)", value=auto_sku)
+        sku = st.text_input("商品貨號 (預設自動產生，可修改)", value=auto_sku)
         
         if st.button("確認建立新商品", type="primary"):
             if not name or not final_cat or not final_ser:
@@ -397,12 +394,10 @@ elif page == "🔨 製造生產 (工廠)":
 
     with tab1:
         with st.form("mfg_out"):
-            # ★★★ 修改 3：加入領料日期 ★★★
+            # 領料日期 & 自動工單
             c_date, c_mo = st.columns(2)
             m_date = c_date.date_input("領料日期", value=date.today())
-            
-            # ★★★ 修改 2：自動產生工單單號 ★★★
-            m_mo = c_mo.text_input("工單單號", value=gen_mo_number()) 
+            m_mo = c_mo.text_input("工單單號", value=gen_mo_number())
 
             c1, c2 = st.columns([2, 1])
             m_sel = c1.selectbox("原料", inv_df['label'].tolist())
@@ -417,11 +412,9 @@ elif page == "🔨 製造生產 (工廠)":
                 rec = {
                     '單據類型': '製造領料',
                     '單號': datetime.now().strftime('%Y%m%d%H%M%S'),
-                    '日期': m_date, # 使用選擇的日期
-                    '系列': m_row['系列'], '分類': m_row['分類'], 
+                    '日期': m_date, '系列': m_row['系列'], '分類': m_row['分類'], 
                     '品名': m_row['品名'], '貨號': m_row['貨號'], '批號': '',
-                    '倉庫': m_wh, '數量': m_qty, 'Key單者': m_user, 
-                    '訂單單號': m_mo # 使用自動產生的工單
+                    '倉庫': m_wh, '數量': m_qty, 'Key單者': m_user, '訂單單號': m_mo
                 }
                 st.session_state['history'] = pd.concat([st.session_state['history'], pd.DataFrame([rec])], ignore_index=True)
                 st.session_state['inventory'] = recalculate_inventory(st.session_state['history'], st.session_state['inventory'])
@@ -432,24 +425,26 @@ elif page == "🔨 製造生產 (工廠)":
 
     with tab2:
         with st.form("mfg_in"):
+            # ★★★ 完工日期欄位 (與上方對齊) ★★★
+            c_date, c_mo = st.columns(2)
+            f_date = c_date.date_input("完工日期", value=date.today())
+            f_mo = c_mo.text_input("工單單號", value=gen_mo_number())
+
             c1, c2 = st.columns([2, 1])
             f_sel = c1.selectbox("成品", inv_df['label'].tolist())
             f_wh = c2.selectbox("入庫給誰", WAREHOUSES, index=1)
             
-            c3, c4 = st.columns(2)
+            c3, c4, c5 = st.columns(3)
             f_qty = c3.number_input("產出量", 1)
             f_batch = c4.text_input("成品批號", value=gen_batch_number("PD"))
-            
-            c5, c6 = st.columns(2)
-            f_mo = c5.text_input("工單單號")
-            f_user = c6.selectbox("Key單者", DEFAULT_KEYERS)
+            f_user = c5.selectbox("Key單者", DEFAULT_KEYERS)
             
             if st.form_submit_button("完工入庫"):
                 f_row = inv_df[inv_df['label'] == f_sel].iloc[0]
                 rec = {
                     '單據類型': '製造入庫',
                     '單號': datetime.now().strftime('%Y%m%d%H%M%S'),
-                    '日期': date.today(), '系列': f_row['系列'], '分類': f_row['分類'], 
+                    '日期': f_date, '系列': f_row['系列'], '分類': f_row['分類'], 
                     '品名': f_row['品名'], '貨號': f_row['貨號'], '批號': f_batch,
                     '倉庫': f_wh, '數量': f_qty, 'Key單者': f_user, '訂單單號': f_mo
                 }
@@ -514,7 +509,7 @@ elif page == "🚚 銷售出貨 (業務/出貨)":
 # ---------------------------------------------------------
 elif page == "📊 總表監控 (修改/刪除)":
     st.subheader("📊 總表監控與資料維護")
-    tab_inv, tab_hist = st.tabs(["📦 庫存總表", "📜 完整流水帳"])
+    tab_inv, tab_hist = st.tabs(["📦 庫存總表 (狀態)", "📜 完整流水帳 (可刪除/修正)"])
     
     with tab_inv:
         df_inv = st.session_state['inventory']
@@ -523,7 +518,7 @@ elif page == "📊 總表監控 (修改/刪除)":
                 df_inv, use_container_width=True, num_rows="dynamic",
                 column_config={"總庫存": st.column_config.NumberColumn(disabled=True)}
             )
-            if st.button("💾 儲存變更"):
+            if st.button("💾 儲存商品資料變更"):
                 st.session_state['inventory'] = edited_inv
                 save_data()
                 st.success("已更新")
@@ -540,7 +535,10 @@ elif page == "📊 總表監控 (修改/刪除)":
             
             edited_hist = st.data_editor(
                 df_display, use_container_width=True, num_rows="dynamic", height=600,
-                column_config={"倉庫": st.column_config.SelectboxColumn("倉庫", options=WAREHOUSES)}
+                column_config={
+                    "倉庫": st.column_config.SelectboxColumn("倉庫", options=WAREHOUSES),
+                    "單據類型": st.column_config.SelectboxColumn("單據類型", options=["進貨", "銷售出貨", "製造領料", "製造入庫"])
+                }
             )
             
             if st.button("💾 儲存修正並重算"):
@@ -558,7 +556,7 @@ elif page == "💰 成本與財務管理 (加密)":
     
     if pwd == ADMIN_PASSWORD:
         st.success("身分驗證成功")
-        tab_fix, tab_full = st.tabs(["💸 補登成本", "📜 完整紀錄"])
+        tab_fix, tab_full, tab_inv = st.tabs(["💸 補登進貨成本", "📜 完整流水帳 (含金額)", "📊 庫存資產總表"])
         
         with tab_fix:
             df = st.session_state['history']
@@ -582,3 +580,13 @@ elif page == "💰 成本與財務管理 (加密)":
                 st.session_state['inventory'] = recalculate_inventory(edited_all, st.session_state['inventory'])
                 save_data()
                 st.success("已更新")
+
+        with tab_inv:
+            st.dataframe(
+                st.session_state['inventory'],
+                use_container_width=True,
+                column_config={
+                    "均價": st.column_config.NumberColumn(format="$%.2f"),
+                    "總庫存": st.column_config.NumberColumn(format="%d")
+                }
+            )
