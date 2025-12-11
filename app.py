@@ -11,8 +11,8 @@ import io
 
 PAGE_TITLE = "製造庫存系統" 
 
-INVENTORY_FILE = 'inventory_secure_v4.csv'
-HISTORY_FILE = 'history_secure_v4.csv'
+INVENTORY_FILE = 'inventory_secure_v5.csv'
+HISTORY_FILE = 'history_secure_v5.csv'
 ADMIN_PASSWORD = "8888"  # 管理員/主管密碼
 
 # 倉庫 (人員)
@@ -123,12 +123,14 @@ def recalculate_inventory(hist_df, current_inv_df):
             w_name = str(h_row['倉庫']).strip()
             if w_name not in WAREHOUSES: w_name = "Wen"
             
-            if doc_type in ['進貨', '製造入庫', '調整入庫', '期初建檔']:
+            # 加項 (進貨/製造入庫/期初/庫存調整-加)
+            if doc_type in ['進貨', '製造入庫', '調整入庫', '期初建檔', '庫存調整(加)']:
                 if cost_total > 0:
                     total_value += cost_total
                 total_qty += qty
                 if w_name in w_stock: w_stock[w_name] += qty
-            elif doc_type in ['銷售出貨', '製造領料', '調整出庫']:
+            # 減項 (銷售/領料/庫存調整-減)
+            elif doc_type in ['銷售出貨', '製造領料', '調整出庫', '庫存調整(減)']:
                 current_avg = (total_value / total_qty) if total_qty > 0 else 0
                 total_qty -= qty
                 total_value -= (qty * current_avg)
@@ -305,6 +307,7 @@ with st.sidebar:
     st.header("部門功能導航")
     page = st.radio("選擇作業", [
         "📦 商品建檔與維護", 
+        "⚖️ 庫存盤點與調整", # ★★★ 新增的功能 ★★★
         "📥 進貨庫存 (無金額)", 
         "🔨 製造生產 (工廠)", 
         "🚚 銷售出貨 (業務/出貨)", 
@@ -438,12 +441,9 @@ if page == "📦 商品建檔與維護":
                 time.sleep(1)
                 st.rerun()
 
-    # ★★★ 修改處：清單改為可編輯模式 ★★★
     with tab_list:
         st.info("此處可直接修改品名、分類或系列。修改後請務必按下「儲存修改」按鈕。")
         df_safe = get_safe_view(st.session_state['inventory'])
-        
-        # 使用 data_editor 開放編輯 (鎖定貨號與庫存)
         edited_products = st.data_editor(
             df_safe,
             use_container_width=True,
@@ -457,23 +457,75 @@ if page == "📦 商品建檔與維護":
                 "庫存_Imeng": st.column_config.NumberColumn(disabled=True)
             }
         )
-        
         if st.button("💾 儲存商品資料修改"):
-            # 將修改後的資料更新回 session_state
-            # 注意：這裡只更新基本資料，不更新庫存數量 (因為庫存被鎖定了，user 改不到)
-            # 但為了安全，我們還是執行一次合併
             current_inv = st.session_state['inventory']
-            
-            # 將 edited_products (不含成本欄位) 的變更寫回 current_inv
             for idx, row in edited_products.iterrows():
                 if idx in current_inv.index:
                     current_inv.at[idx, '品名'] = row['品名']
                     current_inv.at[idx, '分類'] = row['分類']
                     current_inv.at[idx, '系列'] = row['系列']
-            
             st.session_state['inventory'] = current_inv
             save_data()
             st.success("✅ 商品資料已更新！")
+
+# ---------------------------------------------------------
+# ★★★ 新增頁面：庫存盤點與調整 ★★★
+# ---------------------------------------------------------
+elif page == "⚖️ 庫存盤點與調整":
+    st.subheader("⚖️ 快速修正庫存 (盤點調整)")
+    st.info("此功能會自動產生一筆調整單，讓庫存變成您輸入的正確數字。")
+    
+    inv_df = st.session_state['inventory']
+    if inv_df.empty:
+        st.warning("無商品資料")
+    else:
+        inv_df['label'] = inv_df['貨號'] + " | " + inv_df['品名']
+        
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            sel_item = st.selectbox("選擇要調整的商品", inv_df['label'].tolist())
+            row = inv_df[inv_df['label'] == sel_item].iloc[0]
+        with c2:
+            sel_wh = st.selectbox("調整哪個倉庫的庫存？", WAREHOUSES)
+            
+        # 顯示當前數量
+        curr_qty = row[f'庫存_{sel_wh}']
+        st.metric(f"目前 {sel_wh} 系統庫存", f"{int(curr_qty)}")
+        
+        st.divider()
+        
+        with st.form("adj_form"):
+            new_qty = st.number_input("🔴 請輸入正確的【盤點實際數量】", min_value=0, value=int(curr_qty))
+            adj_reason = st.text_input("調整原因 (例如：盤點差異、遺失、破損)", value="庫存盤點修正")
+            
+            if st.form_submit_button("✅ 確認修正庫存"):
+                diff = new_qty - curr_qty
+                
+                if diff == 0:
+                    st.warning("數量未變動，無需調整。")
+                else:
+                    # 判斷是加還是減
+                    action = "庫存調整(加)" if diff > 0 else "庫存調整(減)"
+                    final_qty = abs(diff) # 轉為正數寫入數量欄位
+                    
+                    rec = {
+                        '單據類型': action,
+                        '單號': f"ADJ-{int(time.time())}",
+                        '日期': date.today(),
+                        '系列': row['系列'], '分類': row['分類'], '品名': row['品名'], '貨號': row['貨號'],
+                        '批號': '',
+                        '倉庫': sel_wh,
+                        '數量': final_qty,
+                        'Key單者': '盤點調整',
+                        '備註': f"{adj_reason} (原:{int(curr_qty)} -> 新:{int(new_qty)})"
+                    }
+                    
+                    st.session_state['history'] = pd.concat([st.session_state['history'], pd.DataFrame([rec])], ignore_index=True)
+                    st.session_state['inventory'] = recalculate_inventory(st.session_state['history'], st.session_state['inventory'])
+                    save_data()
+                    st.success(f"已修正！庫存已更新為 {new_qty}。")
+                    time.sleep(1)
+                    st.rerun()
 
 # ---------------------------------------------------------
 # 頁面 2: 進貨
@@ -631,7 +683,7 @@ elif page == "🚚 銷售出貨 (業務/出貨)":
         st.dataframe(get_safe_view(df[mask]), use_container_width=True)
 
 # ---------------------------------------------------------
-# 頁面 0: 總表監控 (主管專用)
+# 頁面 0: 總表監控
 # ---------------------------------------------------------
 elif page == "📊 總表監控 (主管專用)":
     st.subheader("📊 總表監控與資料維護")
@@ -667,7 +719,7 @@ elif page == "📊 總表監控 (主管專用)":
                     df_display, use_container_width=True, num_rows="dynamic", height=600,
                     column_config={
                         "倉庫": st.column_config.SelectboxColumn("倉庫", options=WAREHOUSES),
-                        "單據類型": st.column_config.SelectboxColumn("單據類型", options=["進貨", "銷售出貨", "製造領料", "製造入庫"])
+                        "單據類型": st.column_config.SelectboxColumn("單據類型", options=["進貨", "銷售出貨", "製造領料", "製造入庫", "期初建檔", "庫存調整(加)", "庫存調整(減)"])
                     }
                 )
                 
