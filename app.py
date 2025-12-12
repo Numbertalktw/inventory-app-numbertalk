@@ -149,7 +149,7 @@ def add_transaction(doc_type, date_str, sku, wh, qty, user, note, cost=0):
     try:
         doc_prefix = {
             "進貨": "IN", "銷售出貨": "OUT", "製造領料": "MO", "製造入庫": "PD",
-            "庫存調整(加)": "ADJ+", "庫存調整(減)": "ADJ-"
+            "庫存調整(加)": "ADJ+", "庫存調整(減)": "ADJ-", "期初建檔": "OPEN"
         }.get(doc_type, "DOC")
         
         doc_no = f"{doc_prefix}-{int(time.time())}"
@@ -180,8 +180,7 @@ def add_transaction(doc_type, date_str, sku, wh, qty, user, note, cost=0):
 
 def process_batch_stock_update(file_obj, default_wh):
     """
-    [新功能] 批量盤點更新
-    邏輯：讀取 Excel -> 取得目前庫存 -> 計算差異 -> 寫入調整單
+    [通用] 批量庫存更新 (可用於期初或盤點)
     """
     try:
         df = pd.read_csv(file_obj) if file_obj.name.endswith('.csv') else pd.read_excel(file_obj)
@@ -191,7 +190,7 @@ def process_batch_stock_update(file_obj, default_wh):
         rename_map = {}
         for c in df.columns:
             if c in ['SKU', '編號', '料號']: rename_map[c] = '貨號'
-            if c in ['數量', '盤點數量', '實際數量', 'Qty']: rename_map[c] = '數量'
+            if c in ['數量', '盤點數量', '實際數量', 'Qty', '庫存', '現有庫存']: rename_map[c] = '數量'
             if c in ['倉庫', 'Warehouse']: rename_map[c] = '倉庫'
         
         df = df.rename(columns=rename_map)
@@ -209,9 +208,9 @@ def process_batch_stock_update(file_obj, default_wh):
             try:
                 new_qty = float(row['數量'])
             except:
-                continue # 數量格式錯誤跳過
+                continue 
 
-            # 決定倉庫 (Excel 指定 > 預設)
+            # 決定倉庫
             target_wh = default_wh
             if '倉庫' in df.columns and pd.notna(row['倉庫']):
                 w_str = str(row['倉庫']).strip()
@@ -226,9 +225,14 @@ def process_batch_stock_update(file_obj, default_wh):
             
             if diff != 0:
                 # 3. 產生調整單
-                doc_type = "庫存調整(加)" if diff > 0 else "庫存調整(減)"
+                if current_qty == 0 and diff > 0:
+                    doc_type = "期初建檔" # 若原本是0，視為期初匯入
+                    note = "期初庫存匯入"
+                else:
+                    doc_type = "庫存調整(加)" if diff > 0 else "庫存調整(減)"
+                    note = f"批量匯入修正 (原:{current_qty} -> 新:{new_qty})"
+                
                 abs_qty = abs(diff)
-                note = f"批量盤點匯入 (原:{current_qty} -> 新:{new_qty})"
                 
                 # 執行交易
                 add_transaction(doc_type, str(date.today()), sku, target_wh, abs_qty, "系統匯入", note)
@@ -236,13 +240,13 @@ def process_batch_stock_update(file_obj, default_wh):
             else:
                 skip_count += 1
                 
-        return True, f"✅ 盤點完成！已修正 {update_count} 筆庫存，{skip_count} 筆無差異。"
+        return True, f"✅ 更新完成！已更新 {update_count} 筆，{skip_count} 筆無變動。"
         
     except Exception as e:
         return False, str(e)
 
 def get_history(doc_type_filter=None):
-    """取得歷史紀錄 (可篩選類型)"""
+    """取得歷史紀錄"""
     conn = get_connection()
     query = """
     SELECT h.id, h.date, h.doc_type, h.doc_no, 
@@ -310,7 +314,8 @@ with st.sidebar:
 if page == "📦 商品管理 (建檔/匯入)":
     st.subheader("📦 商品資料維護")
     
-    tab1, tab2 = st.tabs(["✨ 單筆建檔", "📂 Excel 匯入"])
+    # ★★★ 這裡加入了「📥 匯入期初庫存」分頁 ★★★
+    tab1, tab2, tab3 = st.tabs(["✨ 單筆建檔", "📂 匯入商品資料", "📥 匯入期初庫存"])
     
     with tab1:
         with st.form("add_prod"):
@@ -332,9 +337,9 @@ if page == "📦 商品管理 (建檔/匯入)":
                     st.error("貨號與品名為必填！")
 
     with tab2:
-        st.info("請上傳 Excel。系統會自動對應 `貨號`, `品名`, `分類`, `系列`, `規格` 欄位。")
-        up = st.file_uploader("上傳商品清單", type=['xlsx', 'csv'])
-        if up and st.button("開始匯入"):
+        st.info("請上傳商品清單 Excel (欄位：`貨號`, `品名`, `分類`, `系列`, `規格`)，此處不含數量。")
+        up = st.file_uploader("上傳商品清單", type=['xlsx', 'csv'], key='prod_up')
+        if up and st.button("開始匯入商品"):
             try:
                 df = pd.read_csv(up) if up.name.endswith('.csv') else pd.read_excel(up)
                 df.columns = [str(c).strip() for c in df.columns]
@@ -360,12 +365,28 @@ if page == "📦 商品管理 (建檔/匯入)":
                                 str(row.get('規格', ''))
                             )
                             count += 1
-                    st.success(f"成功匯入 {count} 筆商品！")
+                    st.success(f"成功匯入 {count} 筆商品資料！")
                     time.sleep(1); st.rerun()
                 else:
                     st.error("Excel 缺少 `貨號` 或 `品名` 欄位")
             except Exception as e:
                 st.error(f"匯入失敗: {e}")
+
+    # ★★★ 新增：期初庫存匯入功能 ★★★
+    with tab3:
+        st.markdown("### 📥 批量匯入庫存")
+        st.info("請上傳包含 `貨號` 與 `數量` 的 Excel 檔。系統會自動建立期初庫存。")
+        
+        wh_batch = st.selectbox("預設入庫倉庫", WAREHOUSES, key="wh_init")
+        up_stock = st.file_uploader("上傳庫存盤點表", type=['xlsx', 'csv'], key='stock_up')
+        
+        if up_stock and st.button("開始匯入庫存"):
+            success, msg = process_batch_stock_update(up_stock, wh_batch)
+            if success:
+                st.success(msg)
+                time.sleep(2); st.rerun()
+            else:
+                st.error(msg)
 
     st.divider()
     st.markdown("#### 目前商品清單")
@@ -476,7 +497,7 @@ elif page == "🔨 製造作業":
         st.warning("請先建立商品資料！")
 
 # ------------------------------------------------------------------
-# 5. 庫存盤點 (含批量匯入)
+# 5. 庫存盤點
 # ------------------------------------------------------------------
 elif page == "⚖️ 庫存盤點":
     st.subheader("⚖️ 庫存調整")
@@ -492,7 +513,6 @@ elif page == "⚖️ 庫存盤點":
                 c1, c2 = st.columns(2)
                 sel = c1.selectbox("商品", prods['label'])
                 wh = c2.selectbox("倉庫", WAREHOUSES)
-                
                 c3, c4 = st.columns(2)
                 action = c3.radio("動作", ["增加 (+)", "減少 (-)"], horizontal=True)
                 qty = c4.number_input("調整數量", 1)
@@ -506,13 +526,12 @@ elif page == "⚖️ 庫存盤點":
                     time.sleep(1); st.rerun()
                     
         with t2:
-            st.markdown("### 📥 上傳盤點結果 Excel")
-            st.info("請上傳包含 `貨號` 與 `數量` 的 Excel 檔。系統會自動計算差異並調整。")
-            
+            st.markdown("### 📥 上傳盤點結果")
+            st.info("上傳盤點 Excel，系統將自動比對庫存差異並產生調整單。")
             wh_batch = st.selectbox("預設盤點倉庫", WAREHOUSES, key="wh_batch")
-            up_stock = st.file_uploader("上傳盤點表", type=['xlsx', 'csv'])
+            up_stock = st.file_uploader("上傳盤點表", type=['xlsx', 'csv'], key='stock_up_batch')
             
-            if up_stock and st.button("開始比對並更新庫存"):
+            if up_stock and st.button("開始更新庫存"):
                 success, msg = process_batch_stock_update(up_stock, wh_batch)
                 if success:
                     st.success(msg)
