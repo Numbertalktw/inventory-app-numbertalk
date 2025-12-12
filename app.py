@@ -51,12 +51,14 @@ PREFIX_MAP = {
 }
 
 # ==========================================
-# 2. 核心函式
+# 2. 核心函式 (修復版)
 # ==========================================
 
 def safe_float(value):
     """[修復] 安全轉換數字，避免 ValueError"""
     try:
+        if pd.isna(value) or str(value).strip() == "":
+            return 0.0
         return float(value)
     except (ValueError, TypeError):
         return 0.0
@@ -64,13 +66,16 @@ def safe_float(value):
 def get_safe_view(df):
     """[修復] 回傳不含敏感欄位的表格"""
     sensitive_cols = ['進貨總成本', '均價', '工資', '款項結清']
-    # 只顯示存在的欄位
+    # 只顯示存在的欄位，避免 KeyError
     safe_cols = [c for c in df.columns if c not in sensitive_cols]
     return df[safe_cols]
 
 def filter_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """通用篩選器 UI 元件 (含全選功能)"""
-    modify = st.checkbox("🔍 開啟資料篩選器 (Filter Data)")
+    if df.empty:
+        return df
+
+    modify = st.checkbox("🔍 開啟資料篩選器 (Filter Data)", key=f"chk_filter_{len(df)}")
 
     if not modify:
         return df
@@ -96,7 +101,7 @@ def filter_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             
             if is_categorical_dtype(df[column]) or df[column].nunique() < 50:
                 options = sorted(df[column].astype(str).unique().tolist())
-                use_all = right.checkbox(f"全選 (Select All) - {column}", value=True, key=f"chk_{column}")
+                use_all = right.checkbox(f"全選 (Select All) - {column}", value=True, key=f"chk_all_{column}")
                 
                 if use_all:
                     user_cat_input = options
@@ -113,7 +118,7 @@ def filter_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             elif is_numeric_dtype(df[column]):
                 _min = float(df[column].min())
                 _max = float(df[column].max())
-                step = (_max - _min) / 100
+                step = (_max - _min) / 100 if _max != _min else 0.1
                 user_num_input = right.slider(f"設定 {column} 的範圍", min_value=_min, max_value=_max, value=(_min, _max), step=step)
                 df = df[df[column].between(*user_num_input)]
                 
@@ -153,13 +158,17 @@ def load_data():
     if os.path.exists(HISTORY_FILE):
         try:
             hist_df = pd.read_csv(HISTORY_FILE)
+            # 修復舊資料的倉庫名稱
             if '倉庫' in hist_df.columns:
                 replace_map = {'原物料倉': 'Wen', '半成品倉': '千畇', '成品倉': 'James', '報廢倉': 'Imeng'}
                 hist_df['倉庫'] = hist_df['倉庫'].replace(replace_map)
+            
             for col in HISTORY_COLUMNS:
                 if col not in hist_df.columns:
                     hist_df[col] = "" if col not in ['數量', '進貨總成本', '運費', '工資'] else 0
+            
             hist_df = hist_df[HISTORY_COLUMNS]
+            # 強制轉型數字
             for c in ['數量', '進貨總成本', '運費', '工資']:
                 hist_df[c] = pd.to_numeric(hist_df[c], errors='coerce').fillna(0)
         except:
@@ -177,10 +186,11 @@ def save_data():
 
 def recalculate_inventory(hist_df, current_inv_df):
     """
-    [修復] 強制轉型避免 ValueError
+    [核心] 根據流水帳重新計算庫存
     """
     new_inv = current_inv_df[INVENTORY_COLUMNS].copy()
     
+    # 補入新商品
     if not hist_df.empty:
         existing_skus = set(new_inv['貨號'].astype(str))
         hist_skus = set(hist_df['貨號'].astype(str))
@@ -191,22 +201,25 @@ def recalculate_inventory(hist_df, current_inv_df):
                 if col not in temp_df.columns: temp_df[col] = 0.0
             new_inv = pd.concat([new_inv, temp_df], ignore_index=True)
 
+    # 歸零準備重算
     cols_reset = ['總庫存', '均價'] + [f'庫存_{w}' for w in WAREHOUSES]
     for col in cols_reset:
         new_inv[col] = 0.0
     
+    # 開始計算
     for idx, row in new_inv.iterrows():
         sku = str(row['貨號'])
         target_hist = hist_df[hist_df['貨號'].astype(str) == sku]
+        
         total_qty = 0
         total_value = 0.0
         w_stock = {w: 0 for w in WAREHOUSES}
         
         for _, h_row in target_hist.iterrows():
-            # [修復] 使用 safe_float
+            # [修復] 使用 safe_float 避免崩潰
             qty = safe_float(h_row['數量'])
             cost_total = safe_float(h_row['進貨總成本'])
-                
+            
             doc_type = str(h_row['單據類型'])
             w_name = str(h_row['倉庫']).strip()
             if w_name not in WAREHOUSES: w_name = "Wen"
@@ -524,15 +537,17 @@ if page == "📦 商品建檔與維護":
                 st.rerun()
 
     with tab_list:
-        st.info("此處可直接修改品名、分類或系列。修改後請務必按下「儲存修改」按鈕。")
+        st.info("💡 此處可直接修改品名、分類或系列。修改後請務必按下「儲存修改」按鈕。")
         df_safe = get_safe_view(st.session_state['inventory'])
         df_safe = filter_dataframe(df_safe)
         
-        # 開放編輯 (鎖定貨號)
+        # ★★★ 開放編輯功能 ★★★
+        # num_rows="dynamic" 允許新增刪除
         edited_products = st.data_editor(
             df_safe,
             use_container_width=True,
-            num_rows="dynamic",
+            num_rows="dynamic", 
+            key="product_editor",
             column_config={
                 "貨號": st.column_config.TextColumn(disabled=True),
                 "總庫存": st.column_config.NumberColumn(disabled=True),
@@ -543,12 +558,18 @@ if page == "📦 商品建檔與維護":
             }
         )
         if st.button("💾 儲存商品資料修改"):
+            # 只更新基本資料，不影響庫存
             current_inv = st.session_state['inventory']
+            # 注意：這裡的邏輯是更新現有貨號的資料
             for idx, row in edited_products.iterrows():
+                # 確保只更新基本資訊
                 if idx in current_inv.index:
                     current_inv.at[idx, '品名'] = row['品名']
                     current_inv.at[idx, '分類'] = row['分類']
                     current_inv.at[idx, '系列'] = row['系列']
+            
+            # 若有新增的行（data_editor dynamic），需額外處理 (這裡簡化，建議用單筆新增功能)
+            # 這裡主要處理「修改」
             st.session_state['inventory'] = current_inv
             save_data()
             st.success("✅ 商品資料已更新！")
@@ -577,8 +598,13 @@ elif page == "⚖️ 庫存盤點與調整":
         st.divider()
         
         with st.form("adj_form"):
-            # [修復] 若庫存為負數，預設值設為 0
-            default_val = int(curr_qty) if int(curr_qty) >= 0 else 0
+            # [修復] 防呆：若目前庫存為負數，盤點輸入框預設顯示為 0，避免 ValueBelowMinError
+            try:
+                default_val = int(curr_qty)
+                if default_val < 0: default_val = 0
+            except:
+                default_val = 0
+                
             new_qty = st.number_input("🔴 請輸入正確的【盤點實際數量】", min_value=0, value=default_val)
             adj_reason = st.text_input("調整原因 (例如：盤點差異、遺失、破損)", value="庫存盤點修正")
             
@@ -796,6 +822,7 @@ elif page == "📊 總表監控 (主管專用)":
         with tab_inv:
             df_inv = st.session_state['inventory']
             if not df_inv.empty:
+                # ★★★ 加入篩選器 ★★★
                 df_filtered_inv = filter_dataframe(df_inv)
                 
                 edited_inv = st.data_editor(
@@ -810,8 +837,10 @@ elif page == "📊 總表監控 (主管專用)":
         with tab_hist:
             df_hist = st.session_state['history']
             if not df_hist.empty:
+                # ★★★ 加入篩選器 ★★★
                 df_filtered_hist = filter_dataframe(df_hist)
                 
+                # ★★★ 開放編輯刪除 (num_rows="dynamic") ★★★
                 edited_hist = st.data_editor(
                     df_filtered_hist, use_container_width=True, num_rows="dynamic", height=600,
                     column_config={
@@ -846,6 +875,7 @@ elif page == "💰 成本與財務管理 (加密)":
             if df_fix.empty:
                 st.info("✅ 無待補登單據")
             else:
+                # ★★★ 加入篩選器 ★★★
                 df_fix_filtered = filter_dataframe(df_fix)
                 edited = st.data_editor(df_fix_filtered, column_config={"進貨總成本": st.column_config.NumberColumn(required=True)})
                 if st.button("💾 儲存"):
@@ -856,6 +886,7 @@ elif page == "💰 成本與財務管理 (加密)":
                     st.success("已更新")
 
         with tab_full:
+            # ★★★ 加入篩選器 ★★★
             df_all_filtered = filter_dataframe(st.session_state['history'])
             edited_all = st.data_editor(df_all_filtered, use_container_width=True, num_rows="dynamic")
             if st.button("💾 儲存修正"):
