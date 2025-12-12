@@ -18,8 +18,8 @@ import re
 
 PAGE_TITLE = "製造庫存系統" 
 
-INVENTORY_FILE = 'inventory_secure_v13.csv'
-HISTORY_FILE = 'history_secure_v13.csv'
+INVENTORY_FILE = 'inventory_secure_v14.csv'
+HISTORY_FILE = 'history_secure_v14.csv'
 RULES_FILE = 'sku_rules_composite_v2.xlsx' 
 ADMIN_PASSWORD = "8888"
 
@@ -37,15 +37,17 @@ HISTORY_COLUMNS = [
     '進貨總成本' 
 ]
 
-# --- 庫存狀態表 (已調整顯示順序) ---
+# --- 庫存狀態表 ---
 INVENTORY_COLUMNS = [
-    '系列', '分類', '品名', '規格', '貨號', # <--- 調整順序：系列優先
+    '系列', '分類', '品名', '規格', '貨號', 
     '總庫存', '均價', 
     '庫存_Wen', '庫存_千畇', '庫存_James', '庫存_Imeng'
 ]
 
-# ★★★ 修改：固定系列選項 ★★★
-DEFAULT_SERIES = ["原料", "半成品", "成品", "包材"]
+# ★★★ 修改 1：清空預設系列，完全依賴您的 Excel 或手動輸入 ★★★
+DEFAULT_SERIES = [] 
+
+# 分類暫時保留預設值供參考，您也可以清空
 DEFAULT_CATEGORIES = ["天然石", "金屬配件", "線材", "包裝材料", "完成品"]
 DEFAULT_KEYERS = ["Wen", "千畇", "James", "Imeng", "小幫手"]
 
@@ -65,23 +67,14 @@ def get_safe_view(df):
     return df[safe_cols]
 
 def sort_inventory(df):
-    """
-    [新功能] 自動排序函式
-    排序邏輯：系列 -> 分類 -> 品名 -> 規格
-    """
+    """自動排序函式：系列 -> 分類 -> 品名 -> 規格"""
     if df.empty: return df
-    
-    # 確保欄位存在才排序
     sort_keys = [col for col in ['系列', '分類', '品名', '規格'] if col in df.columns]
-    
     if sort_keys:
-        # 將 NaN 填補為空字串以避免排序錯誤
         temp_df = df.copy()
         for k in sort_keys:
             temp_df[k] = temp_df[k].fillna("")
-        
         return temp_df.sort_values(by=sort_keys, ascending=True).reset_index(drop=True)
-    
     return df
 
 def filter_dataframe(df: pd.DataFrame) -> pd.DataFrame:
@@ -122,12 +115,8 @@ def load_data():
             for col in INVENTORY_COLUMNS:
                 if col not in inv_df.columns:
                     inv_df[col] = 0.0 if '庫存' in col or '均價' in col else ""
-            
-            # 確保欄位順序並排序
-            inv_df = inv_df[INVENTORY_COLUMNS]
             inv_df['貨號'] = inv_df['貨號'].astype(str)
-            inv_df = sort_inventory(inv_df) # ★ 載入時自動排序
-            
+            inv_df = sort_inventory(inv_df)
         except: inv_df = pd.DataFrame(columns=INVENTORY_COLUMNS)
     else: inv_df = pd.DataFrame(columns=INVENTORY_COLUMNS)
 
@@ -176,7 +165,6 @@ def load_rules():
 
 def save_data():
     if 'inventory' in st.session_state:
-        # ★ 存檔前再排序一次
         sorted_inv = sort_inventory(st.session_state['inventory'])
         sorted_inv.to_csv(INVENTORY_FILE, index=False, encoding='utf-8-sig')
     if 'history' in st.session_state:
@@ -224,7 +212,7 @@ def recalculate_inventory(hist_df, current_inv_df):
         new_inv.at[idx, '均價'] = (total_value / total_qty) if total_qty > 0 else 0
         for w in WAREHOUSES: new_inv.at[idx, f'庫存_{w}'] = w_stock[w]
             
-    return sort_inventory(new_inv) # ★ 重算後也排序
+    return sort_inventory(new_inv)
 
 def gen_batch_number(prefix="BAT"): return f"{prefix}-{datetime.now().strftime('%y%m%d%H%M')}"
 def gen_mo_number(): return f"MO-{datetime.now().strftime('%y%m%d-%H%M')}"
@@ -247,10 +235,31 @@ def convert_to_excel_all_sheets(inv_df, hist_df):
     return output.getvalue()
 
 def get_dynamic_options(column_name, default_list):
+    """
+    [升級版] 選單邏輯：
+    1. 優先讀取 Rules 規則表 (Excel)
+    2. 其次讀取 Inventory 現有資料
+    3. 最後加上 Default list (若有)
+    """
     options = set(default_list)
+    
+    # 從現有庫存讀取
     if not st.session_state['inventory'].empty:
         existing = st.session_state['inventory'][column_name].dropna().unique().tolist()
         options.update([str(x) for x in existing if str(x).strip() != ""])
+        
+    # ★★★ 新增：從規則表讀取 ★★★
+    rules = st.session_state.get('sku_rules', {})
+    
+    # 對應規則表中的 key
+    rule_key_map = {'系列': 'series', '分類': 'category'}
+    if column_name in rule_key_map:
+        rule_key = rule_key_map[column_name]
+        if rule_key in rules and not rules[rule_key].empty:
+            # 讀取規則表中的「名稱」欄位加入選單
+            rule_opts = rules[rule_key]['名稱'].astype(str).unique().tolist()
+            options.update([x for x in rule_opts if x.strip() != ""])
+
     return sorted(list(options)) + ["➕ 手動輸入新資料"]
 
 def auto_generate_composite_sku(cat, ser, name, spec):
@@ -283,23 +292,25 @@ def process_rules_upload_v2(file_obj):
         xls = pd.ExcelFile(file_obj)
         sheet_map_raw = {s.strip(): s for s in xls.sheet_names}
         required_map = {'類別規則': 'category', '系列規則': 'series', '品名規則': 'name', '規格規則': 'spec'}
-        missing = []
-        for req_name in required_map.keys():
-            if req_name not in sheet_map_raw: missing.append(req_name)
-        if missing: return None, f"❌ 缺分頁：{missing}"
-
-        # 暫存為 buffer 讓 load_rules 讀取
-        # 在 Streamlit Cloud 環境這一步較複雜，直接回傳字典比較快
+        
+        # 允許部分缺失，不強制報錯，只提示
         new_rules = {}
+        found_info = []
+        
         for req_name, key in required_map.items():
-            df = pd.read_excel(xls, sheet_name=sheet_map_raw[req_name]).astype(str)
-            if df.shape[1] >= 2:
-                df = df.iloc[:, :2]
-                df.columns = ['名稱', '代碼']
-                new_rules[key] = df
-            else: new_rules[key] = pd.DataFrame(columns=['名稱', '代碼'])
-            
-        return new_rules, "OK"
+            if req_name in sheet_map_raw:
+                df = pd.read_excel(xls, sheet_name=sheet_map_raw[req_name]).astype(str)
+                if df.shape[1] >= 2:
+                    df = df.iloc[:, :2]
+                    df.columns = ['名稱', '代碼']
+                    new_rules[key] = df
+                    found_info.append(f"✅ {req_name}")
+                else:
+                    new_rules[key] = pd.DataFrame(columns=['名稱', '代碼'])
+            else:
+                new_rules[key] = pd.DataFrame(columns=['名稱', '代碼'])
+        
+        return new_rules, " / ".join(found_info)
     except Exception as e: return None, str(e)
 
 def process_product_upload(file):
@@ -431,10 +442,10 @@ if page == "📦 商品建檔與維護":
                 new_rules, msg = process_rules_upload_v2(up_rule)
                 if new_rules is not None:
                     st.session_state['sku_rules'] = new_rules
-                    # 這裡需要手動存檔規則，因為 save_data 只處理 csv
-                    # 為了簡化，我們將規則存入 csv 檔案 (僅分類規則)，或直接依賴 session
-                    # 最佳解：直接使用 new_rules
-                    st.success("規則已更新！")
+                    # 手動存檔
+                    save_rules_to_excel(new_rules) 
+                    st.success(f"規則更新成功：{msg}")
+                    time.sleep(1); st.rerun()
                 else:
                     st.error(msg)
         
@@ -447,7 +458,7 @@ if page == "📦 商品建檔與維護":
 
     with t1:
         c1, c2 = st.columns(2)
-        # ★★★ 修改：系列優先，且使用 DEFAULT_SERIES ★★★
+        # ★★★ 升級：選單會自動包含「規則表」裡的選項 ★★★
         ser_opts = get_dynamic_options('系列', DEFAULT_SERIES)
         ser = c1.selectbox("系列", ser_opts)
         ser = st.text_input("輸入新系列") if ser == "➕ 手動輸入新資料" else ser
@@ -484,7 +495,7 @@ if page == "📦 商品建檔與維護":
                         r['總庫存']=0; r['均價']=0
                         for w in WAREHOUSES: r[f'庫存_{w}']=0
                         old = pd.concat([old, pd.DataFrame([r.to_dict()])], ignore_index=True)
-                st.session_state['inventory'] = sort_inventory(old) # 匯入後排序
+                st.session_state['inventory'] = sort_inventory(old)
                 save_data(); st.success("匯入完成"); time.sleep(1); st.rerun()
             else: st.error(msg)
             
@@ -500,7 +511,6 @@ if page == "📦 商品建檔與維護":
             else: st.error(msg)
 
     with t5:
-        # 顯示時已排序
         df = get_safe_view(st.session_state['inventory'])
         edited = st.data_editor(filter_dataframe(df), num_rows="dynamic", use_container_width=True, key="inv_editor")
         if st.button("儲存修改"):
@@ -508,14 +518,13 @@ if page == "📦 商品建檔與維護":
             for idx, row in edited.iterrows():
                 if idx in curr.index:
                     for col in ['品名','分類','系列','規格']: curr.at[idx, col] = row[col]
-            st.session_state['inventory'] = sort_inventory(curr) # 存檔時排序
+            st.session_state['inventory'] = sort_inventory(curr)
             save_data(); st.success("已更新")
 
 elif page == "⚖️ 庫存盤點與調整":
     st.subheader("⚖️ 庫存調整")
     inv = st.session_state['inventory']
     if not inv.empty:
-        # 排序選單
         inv = sort_inventory(inv)
         inv['label'] = inv['貨號'] + " | " + inv['品名']
         
