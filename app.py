@@ -10,7 +10,7 @@ from datetime import date, datetime
 import os
 import time
 import io
-import re # 新增：用於正則表達式提取英文前綴
+import re
 
 # ==========================================
 # 1. 系統設定
@@ -18,9 +18,9 @@ import re # 新增：用於正則表達式提取英文前綴
 
 PAGE_TITLE = "製造庫存系統" 
 
-INVENTORY_FILE = 'inventory_secure_v7.csv'
-HISTORY_FILE = 'history_secure_v7.csv'
-RULES_FILE = 'sku_rules.csv' # 儲存規則的檔案
+INVENTORY_FILE = 'inventory_secure_v8.csv'
+HISTORY_FILE = 'history_secure_v8.csv'
+RULES_FILE = 'sku_rules.csv'
 ADMIN_PASSWORD = "8888"
 
 # 倉庫 (人員)
@@ -47,13 +47,14 @@ DEFAULT_SERIES = ["原料", "半成品", "成品", "包材"]
 DEFAULT_CATEGORIES = ["天然石", "金屬配件", "線材", "包裝材料", "完成品"]
 DEFAULT_KEYERS = ["Wen", "千畇", "James", "Imeng", "小幫手"]
 
-# 預設規則 (若沒有學習到任何規則時使用)
+# 預設規則 (當讀不到檔案時的備案)
 DEFAULT_RULES = [
     {"分類名稱": "天然石", "代碼前綴": "ST"},
     {"分類名稱": "金屬配件", "代碼前綴": "MT"},
     {"分類名稱": "線材", "代碼前綴": "WR"},
     {"分類名稱": "包裝材料", "代碼前綴": "PK"},
     {"分類名稱": "完成品", "代碼前綴": "PD"},
+    {"分類名稱": "耗材", "代碼前綴": "OT"},
 ]
 
 # ==========================================
@@ -119,7 +120,6 @@ def filter_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def load_data():
-    """讀取庫存與歷史紀錄"""
     if os.path.exists(INVENTORY_FILE):
         try:
             inv_df = pd.read_csv(INVENTORY_FILE)
@@ -154,11 +154,10 @@ def load_data():
     return inv_df, hist_df
 
 def load_rules():
-    """讀取貨號規則"""
+    """讀取規則，若無檔案則使用預設"""
     if os.path.exists(RULES_FILE):
         try:
-            df = pd.read_csv(RULES_FILE)
-            return df
+            return pd.read_csv(RULES_FILE)
         except:
             return pd.DataFrame(DEFAULT_RULES)
     else:
@@ -252,33 +251,49 @@ def get_dynamic_options(column_name, default_list):
         options.update([str(x) for x in existing if str(x).strip() != ""])
     return sorted(list(options)) + ["➕ 手動輸入新資料"]
 
-# ★★★ 修改：自動學習規則函式 ★★★
 def learn_rules_from_file(file_obj):
-    """從上傳的 Excel 中分析 分類 -> 貨號前綴 的規則"""
+    """
+    [升級版] 自動學習規則，容錯率更高
+    """
     try:
         if file_obj.name.endswith('.csv'):
             df = pd.read_csv(file_obj)
         else:
             df = pd.read_excel(file_obj)
             
-        # 欄位對應
-        rename_map = {'名稱': '品名', '商品名稱': '品名', '類別': '分類', 'SKU': '貨號'}
-        df = df.rename(columns=rename_map)
+        # 1. 模糊匹配欄位名稱
+        col_map = {}
+        for col in df.columns:
+            clean_col = col.strip().replace(" ", "")
+            if clean_col in ['分類', '類別', '商品分類', 'Category']:
+                col_map[col] = '分類名稱'
+            elif clean_col in ['貨號', 'SKU', 'Code', '編號', '代碼']:
+                col_map[col] = '貨號範例'
+                
+        df = df.rename(columns=col_map)
         
-        if '分類' not in df.columns or '貨號' not in df.columns:
-            return None, "Excel 必須包含「分類」與「貨號」欄位才能學習規則"
+        if '分類名稱' not in df.columns or '貨號範例' not in df.columns:
+            return None, f"無法識別欄位。請確保 Excel 包含「分類」與「貨號」相關欄位。目前欄位：{list(df.columns)}"
             
+        # 2. 分析規則
         rules = []
-        # 對每個分類，找出第一個貨號，提取英文字母部分
-        for cat in df['分類'].dropna().unique():
-            sample_sku = df[df['分類'] == cat]['貨號'].dropna().iloc[0]
-            # 使用正則表達式提取開頭的英文字母
-            match = re.match(r"^([A-Za-z]+)", str(sample_sku))
+        for cat in df['分類名稱'].dropna().unique():
+            # 找出該分類的第一個貨號
+            sample_sku = df[df['分類名稱'] == cat]['貨號範例'].dropna().astype(str).iloc[0]
+            
+            # 提取前綴 (抓取開頭的英文字母)
+            match = re.match(r"^([A-Za-z]+)", sample_sku)
             if match:
                 prefix = match.group(1).upper()
                 rules.append({"分類名稱": cat, "代碼前綴": prefix})
+            else:
+                # 如果沒有英文，也許是前2碼？先暫定
+                rules.append({"分類名稱": cat, "代碼前綴": sample_sku[:2]})
                 
-        new_rules_df = pd.DataFrame(rules)
+        if not rules:
+            return None, "找不到可用的編碼規則 (貨號需要以英文開頭)"
+            
+        new_rules_df = pd.DataFrame(rules).drop_duplicates(subset=['分類名稱'])
         return new_rules_df, "OK"
         
     except Exception as e:
@@ -287,14 +302,12 @@ def learn_rules_from_file(file_obj):
 def auto_generate_sku(category):
     """根據規則表產生貨號"""
     rules_df = st.session_state['sku_rules']
-    
-    # 查找對應的前綴
     prefix_row = rules_df[rules_df['分類名稱'] == category]
     
     if not prefix_row.empty:
         prefix = str(prefix_row.iloc[0]['代碼前綴'])
     else:
-        prefix = "XX" # 預設
+        prefix = "XX"
         
     df = st.session_state['inventory']
     if df.empty: return f"{prefix}0001"
@@ -430,17 +443,14 @@ with st.sidebar:
             st.download_button("📊 庫存現況表.xlsx",
                 data=convert_single_sheet_to_excel(st.session_state['inventory'], "庫存表"),
                 file_name=f"Stock_{date.today()}.xlsx")
-            
             df_in = st.session_state['history'][st.session_state['history']['單據類型'] == '進貨']
             st.download_button("📥 進貨紀錄表.xlsx",
                 data=convert_single_sheet_to_excel(df_in, "進貨紀錄"),
                 file_name=f"Purchase_{date.today()}.xlsx")
-                
             df_out = st.session_state['history'][st.session_state['history']['單據類型'].isin(['銷售出貨'])]
             st.download_button("🚚 銷貨紀錄表.xlsx",
                 data=convert_single_sheet_to_excel(df_out, "銷貨紀錄"),
                 file_name=f"Sales_{date.today()}.xlsx")
-                
             df_mfg = st.session_state['history'][st.session_state['history']['單據類型'].str.contains('製造', na=False)]
             st.download_button("🔨 製造紀錄表.xlsx",
                 data=convert_single_sheet_to_excel(df_mfg, "製造紀錄"),
@@ -473,14 +483,14 @@ if page == "📦 商品建檔與維護":
     st.subheader("📦 商品資料庫管理")
     tab_single, tab_batch, tab_opening, tab_rules, tab_list = st.tabs(["✨ 單筆建檔", "📂 批次匯入 (基本資料)", "📥 匯入期初庫存", "⚙️ 編碼規則設定", "📋 檢視/修改商品"])
     
-    # ★★★ 新增：編碼規則設定頁面 ★★★
+    # ★★★ 新功能：規則設定 ★★★
     with tab_rules:
-        st.info("💡 在此上傳您的「貨號產生器」Excel，系統會自動分析並學習分類與代碼的對應規則。")
+        st.info("💡 請上傳您的 Excel，系統會自動學習「分類」與「貨號前綴」的對應關係。")
         
         c1, c2 = st.columns([1, 2])
         with c1:
-            up_rule = st.file_uploader("上傳 Excel (含 分類 與 貨號)", type=['xlsx', 'xls', 'csv'], key='rule_up')
-            if up_rule and st.button("🤖 開始學習規則"):
+            up_rule = st.file_uploader("上傳規則 Excel/CSV", type=['xlsx', 'xls', 'csv'], key='rule_up')
+            if up_rule and st.button("🤖 分析並學習規則"):
                 new_rules, msg = learn_rules_from_file(up_rule)
                 if new_rules is not None:
                     st.session_state['sku_rules'] = new_rules
@@ -488,7 +498,12 @@ if page == "📦 商品建檔與維護":
                     st.success(f"成功學習 {len(new_rules)} 條規則！")
                 else:
                     st.error(msg)
-        
+            
+            if st.button("🔄 重置回系統預設值"):
+                st.session_state['sku_rules'] = pd.DataFrame(DEFAULT_RULES)
+                save_data()
+                st.warning("已重置為預設規則")
+
         with c2:
             st.caption("目前的編碼規則 (可直接修改)：")
             edited_rules = st.data_editor(st.session_state['sku_rules'], num_rows="dynamic", use_container_width=True)
@@ -506,6 +521,8 @@ if page == "📦 商品建檔與維護":
         ser_sel = st.selectbox("商品系列", ser_opts)
         final_ser = st.text_input("↳ 請輸入新系列名稱") if ser_sel == "➕ 手動輸入新資料" else ser_sel
         name = st.text_input("商品品名")
+        
+        # 根據規則產生
         auto_sku = auto_generate_sku(final_cat) if final_cat else ""
         sku = st.text_input("商品貨號 (預設自動產生)", value=auto_sku)
         
@@ -610,7 +627,6 @@ elif page == "⚖️ 庫存盤點與調整":
         st.warning("無商品資料")
     else:
         inv_df['label'] = inv_df['貨號'] + " | " + inv_df['品名']
-        
         c1, c2 = st.columns([2, 1])
         with c1:
             sel_item = st.selectbox("選擇要調整的商品", inv_df['label'].tolist())
@@ -620,9 +636,7 @@ elif page == "⚖️ 庫存盤點與調整":
             
         curr_qty = safe_float(row[f'庫存_{sel_wh}'])
         st.metric(f"目前 {sel_wh} 系統庫存", f"{int(curr_qty)}")
-        
         st.divider()
-        
         with st.form("adj_form"):
             default_val = int(curr_qty) if int(curr_qty) >= 0 else 0
             new_qty = st.number_input("🔴 請輸入正確的【盤點實際數量】", min_value=0, value=default_val)
@@ -630,13 +644,11 @@ elif page == "⚖️ 庫存盤點與調整":
             
             if st.form_submit_button("✅ 確認修正庫存"):
                 diff = new_qty - curr_qty
-                
                 if diff == 0:
                     st.warning("數量未變動，無需調整。")
                 else:
                     action = "庫存調整(加)" if diff > 0 else "庫存調整(減)"
                     final_qty = abs(diff) 
-                    
                     rec = {
                         '單據類型': action,
                         '單號': f"ADJ-{int(time.time())}",
@@ -648,10 +660,8 @@ elif page == "⚖️ 庫存盤點與調整":
                         'Key單者': '盤點調整',
                         '備註': f"{adj_reason} (原:{int(curr_qty)} -> 新:{int(new_qty)})"
                     }
-                    
                     for c in HISTORY_COLUMNS:
                         if c not in rec: rec[c] = ""
-                        
                     st.session_state['history'] = pd.concat([st.session_state['history'], pd.DataFrame([rec])], ignore_index=True)
                     st.session_state['inventory'] = recalculate_inventory(st.session_state['history'], st.session_state['inventory'])
                     save_data()
@@ -703,7 +713,6 @@ elif page == "📥 進貨庫存 (無金額)":
         df_view = df[df['單據類型'] == '進貨'].copy()
         purchase_cols = ['單號', '日期', '廠商', '系列', '分類', '品名', '貨號', '批號', '倉庫', '數量', 'Key單者', '備註']
         valid_cols = [c for c in purchase_cols if c in df_view.columns]
-        
         st.write("---")
         df_filtered = filter_dataframe(df_view[valid_cols])
         st.dataframe(df_filtered, use_container_width=True)
@@ -823,7 +832,6 @@ elif page == "🚚 銷售出貨 (業務/出貨)":
         df_view = df[mask].copy()
         sales_cols = ['單號', '訂單單號', '出貨日期', '系列', '分類', '品名', '貨號', '倉庫', '數量', '運費', 'Key單者', '備註']
         valid_cols = [c for c in sales_cols if c in df_view.columns]
-        
         st.write("---")
         df_filtered = filter_dataframe(df_view[valid_cols])
         st.dataframe(df_filtered, use_container_width=True)
@@ -843,7 +851,6 @@ elif page == "📊 總表監控 (主管專用)":
             df_inv = st.session_state['inventory']
             if not df_inv.empty:
                 df_filtered_inv = filter_dataframe(df_inv)
-                
                 edited_inv = st.data_editor(
                     df_filtered_inv, use_container_width=True, num_rows="dynamic",
                     column_config={"總庫存": st.column_config.NumberColumn(disabled=True)}
@@ -857,7 +864,6 @@ elif page == "📊 總表監控 (主管專用)":
             df_hist = st.session_state['history']
             if not df_hist.empty:
                 df_filtered_hist = filter_dataframe(df_hist)
-                
                 edited_hist = st.data_editor(
                     df_filtered_hist, use_container_width=True, num_rows="dynamic", height=600,
                     column_config={
@@ -865,7 +871,6 @@ elif page == "📊 總表監控 (主管專用)":
                         "單據類型": st.column_config.SelectboxColumn("單據類型", options=["進貨", "銷售出貨", "製造領料", "製造入庫", "期初建檔", "庫存調整(加)", "庫存調整(減)"])
                     }
                 )
-                
                 if st.button("💾 儲存修正並重算"):
                     st.session_state['history'] = edited_hist
                     st.session_state['inventory'] = recalculate_inventory(edited_hist, st.session_state['inventory'])
