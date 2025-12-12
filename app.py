@@ -18,9 +18,9 @@ import re
 
 PAGE_TITLE = "製造庫存系統" 
 
-INVENTORY_FILE = 'inventory_secure_v11.csv'
-HISTORY_FILE = 'history_secure_v11.csv'
-RULES_FILE = 'sku_rules_composite.xlsx' 
+INVENTORY_FILE = 'inventory_secure_v12.csv'
+HISTORY_FILE = 'history_secure_v12.csv'
+RULES_FILE = 'sku_rules_composite_v2.xlsx' 
 ADMIN_PASSWORD = "8888"
 
 WAREHOUSES = ["Wen", "千畇", "James", "Imeng"]
@@ -121,8 +121,17 @@ def load_data():
     else: hist_df = pd.DataFrame(columns=HISTORY_COLUMNS)
     return inv_df, hist_df
 
+def save_rules_to_excel(rules_dict):
+    """將規則字典存回 Excel"""
+    with pd.ExcelWriter(RULES_FILE, engine='openpyxl') as writer:
+        # 對照中文分頁名
+        name_map = {'category': '類別規則', 'series': '系列規則', 'name': '品名規則', 'spec': '規格規則'}
+        for key, df in rules_dict.items():
+            sheet_name = name_map.get(key, key)
+            df.to_excel(writer, index=False, sheet_name=sheet_name)
+
 def load_rules():
-    """讀取規則檔，若無則回傳空結構"""
+    """讀取規則，增加模糊匹配邏輯"""
     empty_rules = {
         'category': pd.DataFrame(columns=['名稱', '代碼']),
         'series': pd.DataFrame(columns=['名稱', '代碼']),
@@ -134,21 +143,28 @@ def load_rules():
         try:
             xls = pd.ExcelFile(RULES_FILE)
             rules = {}
-            # 建立寬鬆的對照表 (去除空白)
-            sheet_map_raw = {s.strip(): s for s in xls.sheet_names}
+            sheet_names = xls.sheet_names
             
-            target_map = {
-                '類別規則': 'category',
-                '系列規則': 'series',
-                '品名規則': 'name',
-                '規格規則': 'spec'
+            # 定義關鍵字對應
+            keyword_map = {
+                'category': ['類別', 'Category', '分類'],
+                'series': ['系列', 'Series'],
+                'name': ['品名', 'Name'],
+                'spec': ['規格', 'Spec', '尺寸']
             }
-            
-            for target_name, key in target_map.items():
-                if target_name in sheet_map_raw:
-                    real_name = sheet_map_raw[target_name]
-                    df = pd.read_excel(xls, sheet_name=real_name).astype(str)
-                    # 強制只取前兩欄，並重命名，確保欄位正確
+
+            for key, keywords in keyword_map.items():
+                found_sheet = None
+                # 模糊搜尋分頁名稱
+                for sheet in sheet_names:
+                    for kw in keywords:
+                        if kw in sheet:
+                            found_sheet = sheet
+                            break
+                    if found_sheet: break
+                
+                if found_sheet:
+                    df = pd.read_excel(xls, sheet_name=found_sheet).astype(str)
                     if df.shape[1] >= 2:
                         df = df.iloc[:, :2]
                         df.columns = ['名稱', '代碼']
@@ -168,6 +184,8 @@ def save_data():
         st.session_state['inventory'].to_csv(INVENTORY_FILE, index=False, encoding='utf-8-sig')
     if 'history' in st.session_state:
         st.session_state['history'].to_csv(HISTORY_FILE, index=False, encoding='utf-8-sig')
+    if 'sku_rules' in st.session_state:
+        save_rules_to_excel(st.session_state['sku_rules'])
 
 def recalculate_inventory(hist_df, current_inv_df):
     new_inv = current_inv_df[INVENTORY_COLUMNS].copy()
@@ -241,17 +259,16 @@ def get_dynamic_options(column_name, default_list):
     return sorted(list(options)) + ["➕ 手動輸入新資料"]
 
 def auto_generate_composite_sku(cat, ser, name, spec):
-    """組合式貨號產生器 (加強版：找不到時取前2碼)"""
+    """組合式貨號產生器"""
     rules = st.session_state['sku_rules']
     
     def get_code(rule_key, val):
         df = rules.get(rule_key)
         if df is None or df.empty: return "XX"
-        # 嘗試完全匹配
         match = df[df['名稱'] == val]
         if not match.empty:
             return str(match.iloc[0]['代碼']).strip().upper()
-        # 嘗試部分匹配 (品名常用)
+        # 模糊搜尋
         for _, r in df.iterrows():
             if str(r['名稱']) in str(val):
                 return str(r['代碼']).strip().upper()
@@ -260,11 +277,9 @@ def auto_generate_composite_sku(cat, ser, name, spec):
     c_code = get_code('category', cat)
     s_code = get_code('series', ser)
     n_code = get_code('name', name)
-    # 品名若沒規則，取前2碼大寫
     if n_code == "XX" and name: n_code = name[:2].upper()
     
     sp_code = get_code('spec', spec)
-    # 規格若沒規則，取數字部分或前2碼
     if sp_code == "XX" and spec: 
         nums = re.findall(r'\d+', spec)
         if nums: sp_code = nums[0]
@@ -273,33 +288,46 @@ def auto_generate_composite_sku(cat, ser, name, spec):
     return f"{c_code}-{s_code}-{n_code}-{sp_code}"
 
 def process_rules_upload_v2(file_obj):
-    """[修復] 處理 4 分頁規則匯入 (增加容錯)"""
+    """處理規則匯入 (強力容錯版)"""
     try:
         xls = pd.ExcelFile(file_obj)
-        # 建立一個忽略空白的對照表
-        sheet_map_raw = {s.strip(): s for s in xls.sheet_names}
+        sheet_names = xls.sheet_names
         
-        required_map = {
-            '類別規則': 'category', 
-            '系列規則': 'series', 
-            '品名規則': 'name', 
-            '規格規則': 'spec'
+        # 建立模糊對照表
+        keyword_map = {
+            'category': ['類別', 'Category', '分類'],
+            'series': ['系列', 'Series'],
+            'name': ['品名', 'Name'],
+            'spec': ['規格', 'Spec', '尺寸']
         }
         
-        missing = []
-        # 檢查是否缺頁
-        for req_name in required_map.keys():
-            if req_name not in sheet_map_raw:
-                missing.append(req_name)
-        
-        if missing:
-            return None, f"❌ 找不到以下分頁：{missing}。\n👀 系統看到的 Excel 分頁是：{list(sheet_map_raw.values())}。\n💡 請檢查分頁名稱是否正確 (不要有多餘文字)。"
+        new_rules = {}
+        found_status = []
 
-        # 若都存在，則儲存檔案供後續使用
-        with open(RULES_FILE, "wb") as f:
-            f.write(file_obj.getbuffer())
+        for key, keywords in keyword_map.items():
+            target_sheet = None
+            for sheet in sheet_names:
+                for kw in keywords:
+                    if kw in sheet:
+                        target_sheet = sheet
+                        break
+                if target_sheet: break
             
-        return load_rules(), "OK"
+            if target_sheet:
+                df = pd.read_excel(xls, sheet_name=target_sheet).astype(str)
+                if df.shape[1] >= 2:
+                    df = df.iloc[:, :2]
+                    df.columns = ['名稱', '代碼']
+                    new_rules[key] = df
+                    found_status.append(f"✅ {key} -> {target_sheet}")
+                else:
+                    new_rules[key] = pd.DataFrame(columns=['名稱', '代碼'])
+                    found_status.append(f"⚠️ {key} -> 格式錯誤 (需2欄)")
+            else:
+                new_rules[key] = pd.DataFrame(columns=['名稱', '代碼'])
+                found_status.append(f"❌ {key} -> 未找到分頁")
+
+        return new_rules, "\n".join(found_status)
 
     except Exception as e:
         return None, str(e)
@@ -429,7 +457,7 @@ if page == "📦 商品建檔與維護":
     
     # ★ 規則設定頁面 ★
     with t4:
-        st.info("請上傳包含 4 個分頁 (`類別規則`, `系列規則`, `品名規則`, `規格規則`) 的 Excel 檔。")
+        st.info("請上傳規則 Excel。系統會自動尋找包含「類別」、「系列」、「品名」、「規格」關鍵字的分頁。")
         c1, c2 = st.columns([1, 2])
         with c1:
             up_rule = st.file_uploader("上傳規則 Excel", type=['xlsx'], key='rule_up')
@@ -437,9 +465,9 @@ if page == "📦 商品建檔與維護":
                 new_rules, msg = process_rules_upload_v2(up_rule)
                 if new_rules is not None:
                     st.session_state['sku_rules'] = new_rules
-                    # 重新載入以確保生效
+                    save_data() # 立即存檔
                     st.success("規則已更新！")
-                    time.sleep(1); st.rerun()
+                    st.text(msg) # 顯示讀取結果
                 else:
                     st.error(msg)
         
