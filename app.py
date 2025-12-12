@@ -18,8 +18,8 @@ import re
 
 PAGE_TITLE = "製造庫存系統" 
 
-INVENTORY_FILE = 'inventory_secure_v15.csv'
-HISTORY_FILE = 'history_secure_v15.csv'
+INVENTORY_FILE = 'inventory_secure_v16.csv'
+HISTORY_FILE = 'history_secure_v16.csv'
 RULES_FILE = 'sku_rules_composite_v2.xlsx' 
 ADMIN_PASSWORD = "8888"
 
@@ -44,8 +44,9 @@ INVENTORY_COLUMNS = [
     '庫存_Wen', '庫存_千畇', '庫存_James', '庫存_Imeng'
 ]
 
+# ★★★ 修改：全部清空，強制只讀取 Excel 規則 ★★★
 DEFAULT_SERIES = [] 
-DEFAULT_CATEGORIES = ["天然石", "金屬配件", "線材", "包裝材料", "完成品"]
+DEFAULT_CATEGORIES = [] 
 DEFAULT_KEYERS = ["Wen", "千畇", "James", "Imeng", "小幫手"]
 
 # ==========================================
@@ -238,10 +239,15 @@ def convert_to_excel_all_sheets(inv_df, hist_df):
     return output.getvalue()
 
 def get_dynamic_options(column_name, default_list):
+    """
+    [修改版] 僅從規則表讀取選項，不讀取舊資料庫存
+    """
     options = set(default_list)
-    if not st.session_state['inventory'].empty:
-        existing = st.session_state['inventory'][column_name].dropna().unique().tolist()
-        options.update([str(x) for x in existing if str(x).strip() != ""])
+    
+    # ★★★ 修改：註解掉讀取現有庫存的邏輯，避免舊資料干擾 ★★★
+    # if not st.session_state['inventory'].empty:
+    #     existing = st.session_state['inventory'][column_name].dropna().unique().tolist()
+    #     options.update([str(x) for x in existing if str(x).strip() != ""])
         
     rules = st.session_state.get('sku_rules', {})
     rule_key_map = {'系列': 'series', '分類': 'category'}
@@ -420,7 +426,6 @@ if page == "📦 商品建檔與維護":
     st.subheader("📦 商品資料庫")
     t1, t2, t3, t4, t5 = st.tabs(["✨ 建檔", "📂 匯入商品", "📥 匯入庫存", "⚙️ 編碼規則設定", "📋 檢視/修改"])
     
-    # ★ 規則設定頁面 ★
     with t4:
         st.info("請上傳包含 4 個分頁 (`類別規則`, `系列規則`, `品名規則`, `規格規則`) 的 Excel 檔。")
         c1, c2 = st.columns([1, 2])
@@ -450,7 +455,6 @@ if page == "📦 商品建檔與維護":
                 time.sleep(1); st.rerun()
 
             st.caption("目前生效的規則預覽：")
-            # ★★★ 修改處：調整分頁顯示順序 ★★★
             rt_series, rt_cat, rt_name, rt_spec = st.tabs(["系列", "類別", "品名", "規格"])
             
             def show_rule_editor(rule_key, label):
@@ -468,6 +472,7 @@ if page == "📦 商品建檔與維護":
 
     with t1:
         c1, c2 = st.columns(2)
+        # 僅顯示規則表中的選項，不顯示庫存舊資料
         ser_opts = get_dynamic_options('系列', DEFAULT_SERIES)
         ser = c1.selectbox("系列", ser_opts)
         ser = st.text_input("輸入新系列") if ser == "➕ 手動輸入新資料" else ser
