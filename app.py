@@ -8,7 +8,7 @@ import time
 # 1. 核心設定區
 # ==========================================
 
-# 系統標準欄位 (新增 '長貨號結構' 用於紀錄拆解資訊)
+# 系統標準欄位 (確保 '尺寸規格' 存在以修復 KeyError)
 COLUMNS = [
     '編號', '分類', '系列', '名稱', '尺寸規格', # 識別欄位
     '寬度mm', '長度mm', '形狀', '五行',       # 實體規格
@@ -54,31 +54,33 @@ def load_coding_rules(uploaded_file=None):
         source = uploaded_file if uploaded_file else (RULES_FILE if os.path.exists(RULES_FILE) else None)
         
         if source:
-            # 讀取 Excel (假設沒有 header 或 header 在第一行，這裡假設第一行是標題)
+            # 讀取 Excel (假設第一行是標題)
             df = pd.read_excel(source, header=0)
             
             # 清理欄位名稱 (去除空白)
             df.columns = [str(c).strip() for c in df.columns]
             
-            # 截取各部分的對照表 (去除空值)
-            # A-B: 類別
-            cat_df = df.iloc[:, [0, 1]].dropna().astype(str)
-            rules['cat'] = dict(zip(cat_df.iloc[:, 0], cat_df.iloc[:, 1]))
-            dfs['cat'] = cat_df
+            # 依據您的截圖結構截取各部分的對照表 (去除空值)
+            # A-B: 類別 (Category)
+            if df.shape[1] >= 2:
+                cat_df = df.iloc[:, [0, 1]].dropna().astype(str)
+                # 排除標題列誤讀 (如果第一列是資料)
+                rules['cat'] = dict(zip(cat_df.iloc[:, 0], cat_df.iloc[:, 1]))
+                dfs['cat'] = cat_df
             
-            # C-D: 系列
+            # C-D: 系列 (Series)
             if df.shape[1] >= 4:
                 series_df = df.iloc[:, [2, 3]].dropna().astype(str)
                 rules['series'] = dict(zip(series_df.iloc[:, 0], series_df.iloc[:, 1]))
                 dfs['series'] = series_df
                 
-            # E-F: 名稱
+            # E-F: 名稱 (Name)
             if df.shape[1] >= 6:
                 name_df = df.iloc[:, [4, 5]].dropna().astype(str)
                 rules['name'] = dict(zip(name_df.iloc[:, 0], name_df.iloc[:, 1]))
                 dfs['name'] = name_df
                 
-            # G-H: 尺寸
+            # G-H: 尺寸 (Size)
             if df.shape[1] >= 8:
                 size_df = df.iloc[:, [6, 7]].dropna().astype(str)
                 rules['size'] = dict(zip(size_df.iloc[:, 0], size_df.iloc[:, 1]))
@@ -102,6 +104,7 @@ def parse_selection(selection, rule_dict):
     
     # 格式通常是 "名稱 (代號)"
     try:
+        # 從最後一個 " (" 切割，避免名稱本身包含括號
         name = selection.rsplit(' (', 1)[0]
         code = selection.rsplit(' (', 1)[1][:-1]
         return name, code
@@ -109,11 +112,11 @@ def parse_selection(selection, rule_dict):
         return selection, ""
 
 def normalize_columns(df):
-    """標準化庫存欄位，確保欄位存在"""
+    """標準化庫存欄位，確保欄位存在且名稱正確"""
     # 舊欄位對應修正
     rename_map = {
-        '尺寸': '尺寸規格', '規格': '尺寸規格', 
-        '寬度': '寬度mm', 'Size': '寬度mm',
+        '尺寸': '尺寸規格', '規格': '尺寸規格', 'Size': '尺寸規格',
+        '寬度': '寬度mm', 'Width': '寬度mm',
         'Name': '名稱', 'Category': '分類',
         'Code': '編號', 'ID': '編號'
     }
@@ -186,7 +189,7 @@ with st.sidebar:
 # ------------------------------------------
 if page == "⚙️ 編碼規則設定":
     st.subheader("⚙️ 商品編碼規則管理")
-    st.info("💡 請上傳 `貨號分類.xlsx`，系統將自動學習分類與代碼規則，用於產生長貨號。")
+    st.info("💡 請上傳 `貨號分類.xlsx`，系統將自動分析 A~H 欄位規則 (類別-系列-名稱-尺寸)。")
     
     # 檔案上傳區
     uploaded_rules = st.file_uploader("上傳規則檔 (Excel)", type=['xlsx', 'xls'])
@@ -204,7 +207,7 @@ if page == "⚙️ 編碼規則設定":
             except:
                 st.success("✅ 規則已暫時載入 (無法寫入伺服器檔案，重新整理需重傳)")
         else:
-            st.error("❌ 讀取失敗，請確認 Excel 格式是否正確 (A/B欄為類別, C/D欄為系列...)")
+            st.error("❌ 讀取失敗，請確認 Excel 欄位順序是否正確。")
 
     st.divider()
     
@@ -215,16 +218,16 @@ if page == "⚙️ 編碼規則設定":
         c1, c2, c3, c4 = st.columns(4)
         
         with c1:
-            st.markdown("**1. 商品類別 (Cat)**")
+            st.markdown("**1. 類別 (A/B欄)**")
             if 'cat' in dfs: st.dataframe(dfs['cat'], hide_index=True)
         with c2:
-            st.markdown("**2. 商品系列 (Series)**")
+            st.markdown("**2. 系列 (C/D欄)**")
             if 'series' in dfs: st.dataframe(dfs['series'], hide_index=True)
         with c3:
-            st.markdown("**3. 商品名稱 (Name)**")
+            st.markdown("**3. 名稱 (E/F欄)**")
             if 'name' in dfs: st.dataframe(dfs['name'], hide_index=True)
         with c4:
-            st.markdown("**4. 尺寸/重量 (Size)**")
+            st.markdown("**4. 尺寸 (G/H欄)**")
             if 'size' in dfs: st.dataframe(dfs['size'], hide_index=True)
     else:
         st.warning("尚未設定規則，請上傳 Excel 檔。")
@@ -242,7 +245,10 @@ elif page == "📦 庫存管理與進貨":
         inv_df = st.session_state['inventory']
         if not inv_df.empty:
             # 製作選單: 顯示 "編號 | 名稱 規格"
-            inv_df['label'] = inv_df.apply(lambda x: f"{x['編號']} | {x['名稱']} {x['尺寸規格']}", axis=1)
+            # 修復 KeyError: 確保欄位存在並轉為字串
+            inv_df['label'] = inv_df.apply(
+                lambda x: f"{str(x['編號'])} | {str(x['名稱'])} {str(x['尺寸規格'])}", axis=1
+            )
             target_label = st.selectbox("選擇商品", inv_df['label'].tolist())
             
             target_row = inv_df[inv_df['label'] == target_label].iloc[0]
@@ -300,7 +306,7 @@ elif page == "📦 庫存管理與進貨":
             if not code_cat: # 手動模式
                 c_m1, c_m2 = st.columns([2,1])
                 name_cat = c_m1.text_input("輸入類別名稱", key="m_cat_n")
-                code_cat = c_m2.text_input("代號", key="m_cat_c").upper()
+                code_cat = c_m2.text_input("代號 (如:SB)", key="m_cat_c").upper()
 
         # 2. 系列選擇
         with col2:
@@ -311,7 +317,7 @@ elif page == "📦 庫存管理與進貨":
             if not code_series:
                 c_m3, c_m4 = st.columns([2,1])
                 name_series = c_m3.text_input("輸入系列名稱", key="m_ser_n")
-                code_series = c_m4.text_input("代號", key="m_ser_c").upper()
+                code_series = c_m4.text_input("代號 (如:S01)", key="m_ser_c").upper()
 
         # 3. 名稱選擇
         with col3:
@@ -322,7 +328,7 @@ elif page == "📦 庫存管理與進貨":
             if not code_prod:
                 c_m5, c_m6 = st.columns([2,1])
                 name_prod = c_m5.text_input("輸入商品名稱", key="m_nm_n")
-                code_prod = c_m6.text_input("代號", key="m_nm_c").upper()
+                code_prod = c_m6.text_input("代號 (如:A01)", key="m_nm_c").upper()
 
         # 4. 尺寸選擇
         with col4:
@@ -333,18 +339,17 @@ elif page == "📦 庫存管理與進貨":
             if not code_size:
                 c_m7, c_m8 = st.columns([2,1])
                 name_size = c_m7.text_input("輸入尺寸規格", key="m_sz_n")
-                code_size = c_m8.text_input("代號", key="m_sz_c").upper()
+                code_size = c_m8.text_input("代號 (如:AA36)", key="m_sz_c").upper()
 
         # --- 產生預覽 ---
         full_id = ""
         if code_cat and code_series and code_prod and code_size:
-            # 組合邏輯：直接串接或加 dash，這裡依照一般習慣不加 dash，若需 dash 可改為 "-".join(...)
-            # 您的截圖範例 H欄是 "AA36"，看起來是直接串接
-            full_id = f"{code_cat}{code_series}{code_prod}{code_size}"
+            # 組合邏輯：依照您的規則 類別-系列-名稱-尺寸
+            full_id = f"{code_cat}-{code_series}-{code_prod}-{code_size}"
             st.success(f"🎫 預覽長貨號：**{full_id}**")
-            st.caption(f"商品全名：{name_cat} - {name_series} - {name_prod} ({name_size})")
+            st.caption(f"全名：{name_cat} {name_series} {name_prod} {name_size}")
         else:
-            st.warning("請完整選擇或輸入以上 4 個欄位與代號")
+            st.warning("請完整選擇 4 個欄位以產生貨號")
 
         st.divider()
         
@@ -415,6 +420,7 @@ elif page == "📦 庫存管理與進貨":
             row = inv.iloc[idx]
             
             with st.form("edit_form"):
+                st.info(f"正在編輯：{row['名稱']} ({row['尺寸規格']})")
                 c1, c2 = st.columns(2)
                 new_stock = c1.number_input("修正庫存數量", value=int(row['庫存(顆)']))
                 new_cost = c2.number_input("修正單顆成本", value=float(row['單顆成本']))
@@ -474,7 +480,7 @@ elif page == "🧮 設計與成本計算":
         if st.session_state['current_design']:
             df_design = pd.DataFrame(st.session_state['current_design'])
             
-            # 顯示表格 (含刪除按鈕邏輯需自訂，這裡用簡單表格呈現)
+            # 顯示表格
             st.table(df_design)
             
             # 移除功能
