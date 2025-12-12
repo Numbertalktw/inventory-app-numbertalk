@@ -18,9 +18,9 @@ import re
 
 PAGE_TITLE = "製造庫存系統" 
 
-# 目前版本 (v16)
-INVENTORY_FILE = 'inventory_secure_v16.csv'
-HISTORY_FILE = 'history_secure_v16.csv'
+# 更新版本號以確保讀取最新邏輯
+INVENTORY_FILE = 'inventory_secure_v18.csv'
+HISTORY_FILE = 'history_secure_v18.csv'
 RULES_FILE = 'sku_rules_composite_v2.xlsx' 
 ADMIN_PASSWORD = "8888"
 
@@ -38,6 +38,9 @@ HISTORY_COLUMNS = [
     '進貨總成本' 
 ]
 
+# 數值型欄位 (用於強制轉型)
+NUMERIC_COLS = ['數量', '運費', '工資', '進貨總成本']
+
 # --- 庫存狀態表 ---
 INVENTORY_COLUMNS = [
     '系列', '分類', '品名', '規格', '貨號', 
@@ -54,17 +57,20 @@ DEFAULT_KEYERS = ["Wen", "千畇", "James", "Imeng", "小幫手"]
 # ==========================================
 
 def safe_float(value):
+    """強制轉為浮點數，失敗回傳 0.0"""
     try:
         if pd.isna(value) or str(value).strip() == "": return 0.0
         return float(str(value).replace(",", ""))
     except: return 0.0
 
 def get_safe_view(df):
+    """取得非敏感欄位視圖"""
     sensitive_cols = ['進貨總成本', '均價', '工資', '款項結清']
     safe_cols = [c for c in df.columns if c not in sensitive_cols]
     return df[safe_cols]
 
 def sort_inventory(df):
+    """排序庫存表"""
     if df.empty: return df
     sort_keys = [col for col in ['系列', '分類', '品名', '規格'] if col in df.columns]
     if sort_keys:
@@ -75,83 +81,123 @@ def sort_inventory(df):
     return df
 
 def filter_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """通用篩選器 (含錯誤處理)"""
     if df.empty: return df
-    modify = st.checkbox("🔍 開啟資料篩選器 (Filter Data)", key=f"f_{len(df)}")
-    if not modify: return df
+    
+    # 建立副本以免影響原始資料
     df = df.copy()
+
+    # 嘗試將日期欄位標準化為 datetime 物件以便篩選
     for col in df.columns:
         if is_object_dtype(df[col]):
-            try: df[col] = pd.to_datetime(df[col])
-            except: pass
+            try:
+                df[col] = pd.to_datetime(df[col])
+            except Exception:
+                pass
+
+    modify = st.checkbox("🔍 開啟資料篩選器 (Filter Data)", key=f"f_{int(time.time()*1000)}")
+    
+    if not modify: 
+        return df
+
     with st.container():
-        cols = st.multiselect("選擇篩選欄位", df.columns)
-        for col in cols:
-            if is_categorical_dtype(df[col]) or df[col].nunique() < 50:
-                opts = sorted(df[col].astype(str).unique())
-                if st.checkbox(f"全選 {col}", value=True, key=f"all_{col}"):
-                    sel = opts
+        try:
+            cols = st.multiselect("選擇篩選欄位", df.columns)
+            for col in cols:
+                if is_categorical_dtype(df[col]) or df[col].nunique() < 50:
+                    opts = sorted(df[col].astype(str).unique())
+                    if st.checkbox(f"全選 {col}", value=True, key=f"all_{col}_{int(time.time())}"):
+                        sel = opts
+                    else:
+                        sel = st.multiselect(f"選擇 {col}", opts, key=f"sel_{col}_{int(time.time())}")
+                    if sel: df = df[df[col].astype(str).isin(sel)]
+                elif is_numeric_dtype(df[col]):
+                    _min, _max = float(df[col].min()), float(df[col].max())
+                    step = (_max - _min) / 100 if _max!=_min else 0.1
+                    r = st.slider(f"{col} 範圍", _min, _max, (_min, _max), step=step, key=f"sl_{col}")
+                    df = df[df[col].between(*r)]
+                elif is_datetime64_any_dtype(df[col]):
+                    user_date_input = st.date_input(f"選擇 {col} 範圍", value=(df[col].min(), df[col].max()), key=f"dt_{col}")
+                    if len(user_date_input) == 2:
+                        start_date, end_date = map(pd.to_datetime, user_date_input)
+                        df = df.loc[df[col] >= start_date]
+                        df = df.loc[df[col] <= end_date]
                 else:
-                    sel = st.multiselect(f"選擇 {col}", opts)
-                if sel: df = df[df[col].astype(str).isin(sel)]
-            elif is_numeric_dtype(df[col]):
-                _min, _max = float(df[col].min()), float(df[col].max())
-                step = (_max - _min) / 100 if _max!=_min else 0.1
-                r = st.slider(f"{col} 範圍", _min, _max, (_min, _max), step=step)
-                df = df[df[col].between(*r)]
-            else:
-                txt = st.text_input(f"搜尋 {col}")
-                if txt: df = df[df[col].astype(str).str.contains(txt, case=False)]
+                    txt = st.text_input(f"搜尋 {col}", key=f"txt_{col}")
+                    if txt: df = df[df[col].astype(str).str.contains(txt, case=False)]
+        except Exception as e:
+            st.warning(f"篩選器發生錯誤，顯示原始資料: {e}")
+            return df
+            
+    return df
+
+def normalize_history_data(df):
+    """
+    ★ 關鍵修復：強制標準化歷史紀錄的資料型別
+    避免因為匯入造成型別混亂 (例如日期變成物件、數字變成字串)
+    """
+    # 補齊欄位
+    for col in HISTORY_COLUMNS:
+        if col not in df.columns:
+            df[col] = 0.0 if col in NUMERIC_COLS else ""
+            
+    # 強制欄位順序
+    df = df[HISTORY_COLUMNS].copy()
+    
+    # 強制轉型數值
+    for col in NUMERIC_COLS:
+        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
+        
+    # 強制轉型日期為字串 (統一格式 yyyy-mm-dd)
+    if '日期' in df.columns:
+        df['日期'] = df['日期'].astype(str).apply(lambda x: x.split(' ')[0] if pd.notnull(x) else str(date.today()))
+        
+    # 其余轉為字串並填補空值
+    str_cols = [c for c in df.columns if c not in NUMERIC_COLS]
+    for col in str_cols:
+        df[col] = df[col].fillna("").astype(str)
+        
     return df
 
 def load_data():
-    """
-    [升級] 自動尋找並繼承舊版本的資料 (v15 -> v16)
-    """
-    # 嘗試讀取 v16, 若無則讀取 v15
+    # 1. 嘗試讀取庫存 (包含舊版相容邏輯)
     target_inv = INVENTORY_FILE
-    target_hist = HISTORY_FILE
-    
-    if not os.path.exists(INVENTORY_FILE) and os.path.exists('inventory_secure_v15.csv'):
+    if not os.path.exists(INVENTORY_FILE) and os.path.exists('inventory_secure_v16.csv'):
+        target_inv = 'inventory_secure_v16.csv'
+    elif not os.path.exists(INVENTORY_FILE) and os.path.exists('inventory_secure_v15.csv'):
         target_inv = 'inventory_secure_v15.csv'
-        st.toast("⚠️ 偵測到舊版庫存資料 (v15)，已自動匯入並升級為 v16！", icon="🔄")
         
-    if not os.path.exists(HISTORY_FILE) and os.path.exists('history_secure_v15.csv'):
-        target_hist = 'history_secure_v15.csv'
-        
-    # 1. 讀取庫存
-    try:
-        inv_df = pd.read_csv(target_inv)
-        # 修正舊欄位名稱
-        rename_map = {'庫存_原物料倉': '庫存_Wen', '庫存_半成品倉': '庫存_千畇', '庫存_成品倉': '庫存_James', '庫存_報廢倉': '庫存_Imeng'}
-        inv_df = inv_df.rename(columns=rename_map)
-        
-        # 補齊新欄位 (如: 規格)
-        for col in INVENTORY_COLUMNS:
-            if col not in inv_df.columns:
-                inv_df[col] = 0.0 if '庫存' in col or '均價' in col else ""
-        
-        inv_df['貨號'] = inv_df['貨號'].astype(str)
-        inv_df = sort_inventory(inv_df)
-    except:
-        inv_df = pd.DataFrame(columns=INVENTORY_COLUMNS)
+    if os.path.exists(target_inv):
+        try:
+            inv_df = pd.read_csv(target_inv)
+            rename_map = {'庫存_原物料倉': '庫存_Wen', '庫存_半成品倉': '庫存_千畇', '庫存_成品倉': '庫存_James', '庫存_報廢倉': '庫存_Imeng'}
+            inv_df = inv_df.rename(columns=rename_map)
+            for col in INVENTORY_COLUMNS:
+                if col not in inv_df.columns:
+                    inv_df[col] = 0.0 if '庫存' in col or '均價' in col else ""
+            inv_df['貨號'] = inv_df['貨號'].astype(str)
+            inv_df = sort_inventory(inv_df)
+        except: inv_df = pd.DataFrame(columns=INVENTORY_COLUMNS)
+    else: inv_df = pd.DataFrame(columns=INVENTORY_COLUMNS)
 
-    # 2. 讀取歷史
-    try:
-        hist_df = pd.read_csv(target_hist)
-        if '倉庫' in hist_df.columns:
-            replace_map = {'原物料倉': 'Wen', '半成品倉': '千畇', '成品倉': 'James', '報廢倉': 'Imeng'}
-            hist_df['倉庫'] = hist_df['倉庫'].replace(replace_map)
-            
-        for col in HISTORY_COLUMNS:
-            if col not in hist_df.columns:
-                hist_df[col] = "" if col not in ['數量', '進貨總成本', '運費', '工資'] else 0
-                
-        hist_df = hist_df[HISTORY_COLUMNS]
-        for c in ['數量', '進貨總成本', '運費', '工資']:
-            hist_df[c] = pd.to_numeric(hist_df[c], errors='coerce').fillna(0)
-    except:
-        hist_df = pd.DataFrame(columns=HISTORY_COLUMNS)
-        
+    # 2. 嘗試讀取歷史 (包含舊版相容邏輯)
+    target_hist = HISTORY_FILE
+    if not os.path.exists(HISTORY_FILE) and os.path.exists('history_secure_v16.csv'):
+        target_hist = 'history_secure_v16.csv'
+    elif not os.path.exists(HISTORY_FILE) and os.path.exists('history_secure_v15.csv'):
+        target_hist = 'history_secure_v15.csv'
+
+    if os.path.exists(target_hist):
+        try:
+            hist_df = pd.read_csv(target_hist)
+            if '倉庫' in hist_df.columns:
+                replace_map = {'原物料倉': 'Wen', '半成品倉': '千畇', '成品倉': 'James', '報廢倉': 'Imeng'}
+                hist_df['倉庫'] = hist_df['倉庫'].replace(replace_map)
+            # 使用標準化函式修復
+            hist_df = normalize_history_data(hist_df)
+        except: hist_df = pd.DataFrame(columns=HISTORY_COLUMNS)
+    else: hist_df = pd.DataFrame(columns=HISTORY_COLUMNS)
+    
     return inv_df, hist_df
 
 def load_rules():
@@ -186,7 +232,9 @@ def save_data():
         sorted_inv = sort_inventory(st.session_state['inventory'])
         sorted_inv.to_csv(INVENTORY_FILE, index=False, encoding='utf-8-sig')
     if 'history' in st.session_state:
-        st.session_state['history'].to_csv(HISTORY_FILE, index=False, encoding='utf-8-sig')
+        # 存檔前再次標準化，確保資料乾淨
+        clean_hist = normalize_history_data(st.session_state['history'])
+        clean_hist.to_csv(HISTORY_FILE, index=False, encoding='utf-8-sig')
 
 def save_rules_to_excel(rules_dict):
     with pd.ExcelWriter(RULES_FILE, engine='openpyxl') as writer:
@@ -196,6 +244,9 @@ def save_rules_to_excel(rules_dict):
             df.to_excel(writer, index=False, sheet_name=sheet_name)
 
 def recalculate_inventory(hist_df, current_inv_df):
+    """重算庫存"""
+    hist_df = normalize_history_data(hist_df) # 確保計算前資料格式正確
+    
     new_inv = current_inv_df[INVENTORY_COLUMNS].copy()
     if not hist_df.empty:
         existing_skus = set(new_inv['貨號'].astype(str))
@@ -216,6 +267,7 @@ def recalculate_inventory(hist_df, current_inv_df):
         total_qty = 0
         total_value = 0.0
         w_stock = {w: 0 for w in WAREHOUSES}
+        
         for _, h_row in target_hist.iterrows():
             qty = safe_float(h_row['數量'])
             cost_total = safe_float(h_row['進貨總成本'])
@@ -261,7 +313,6 @@ def convert_to_excel_all_sheets(inv_df, hist_df):
 
 def get_dynamic_options(column_name, default_list):
     options = set(default_list)
-    # 不讀取庫存舊資料，只讀取規則
     rules = st.session_state.get('sku_rules', {})
     rule_key_map = {'系列': 'series', '分類': 'category'}
     if column_name in rule_key_map:
@@ -304,8 +355,14 @@ def process_rules_upload_v2(file_obj):
         new_rules = {}
         found_info = []
         for req_name, key in required_map.items():
-            if req_name in sheet_map_raw:
-                df = pd.read_excel(xls, sheet_name=sheet_map_raw[req_name]).astype(str)
+            found_sheet = None
+            for s_name in sheet_map_raw.keys():
+                if req_name in s_name:
+                    found_sheet = s_name
+                    break
+            
+            if found_sheet:
+                df = pd.read_excel(xls, sheet_name=sheet_map_raw[found_sheet]).astype(str)
                 if df.shape[1] >= 2:
                     df = df.iloc[:, :2]
                     df.columns = ['名稱', '代碼']
@@ -330,49 +387,77 @@ def process_product_upload(file):
     except Exception as e: return None, str(e)
 
 def process_opening(file, wh):
+    """
+    [升級] 匯入期初庫存 - 確保格式正確
+    """
     try:
-        df = pd.read_csv(file) if file.name.endswith('.csv') else pd.read_excel(file)
-        rename = {'名稱':'品名','SKU':'貨號','庫存':'數量','成本':'進貨總成本'}
-        df = df.rename(columns=rename)
-        if '貨號' not in df.columns or '數量' not in df.columns: return None, "缺貨號或數量"
-        
+        if file.name.endswith('.csv'):
+            dfs = [pd.read_csv(file)]
+        else:
+            xls = pd.ExcelFile(file)
+            dfs = [pd.read_excel(xls, sheet) for sheet in xls.sheet_names]
+            
         recs = []
         inv = st.session_state['inventory']
-        for _, row in df.iterrows():
-            sku = str(row['貨號'])
-            qty = safe_float(row['數量'])
-            if qty <= 0: continue
+        
+        for df in dfs:
+            # 清理欄位名稱
+            df.columns = [str(c).strip() for c in df.columns]
+            rename_map = {}
+            for col in df.columns:
+                if col in ['名稱', '品名', '商品名稱']: rename_map[col] = '品名'
+                elif col in ['SKU', '貨號', '料號']: rename_map[col] = '貨號'
+                elif col in ['庫存', '現有庫存', '數量', 'Qty']: rename_map[col] = '數量'
+                elif col in ['成本', '進貨總成本', 'Cost', '總成本']: rename_map[col] = '進貨總成本'
             
-            exist = inv[inv['貨號']==sku]
-            if not exist.empty:
-                ser, cat, name = exist.iloc[0]['系列'], exist.iloc[0]['分類'], exist.iloc[0]['品名']
-                spec = exist.iloc[0]['規格']
-            else:
-                ser = row.get('系列','期初')
-                cat = row.get('分類','期初')
-                name = row.get('品名', f'未命名-{sku}')
-                spec = row.get('規格','')
+            df = df.rename(columns=rename_map)
+            if '貨號' not in df.columns or '數量' not in df.columns: continue
+            
+            for _, row in df.iterrows():
+                sku = str(row['貨號']).strip()
+                if not sku: continue
                 
-            recs.append({
-                '單據類型':'期初建檔', '單號':f"OPEN-{int(time.time())}-{sku}",
-                '日期':date.today(), '系列':ser, '分類':cat, '品名':name, '貨號':sku, '規格':spec,
-                '批號':f"INIT-{date.today():%Y%m%d}", '倉庫':wh, '數量':qty,
-                'Key單者':'匯入', '進貨總成本': safe_float(row.get('進貨總成本',0)), '備註':'期初匯入'
-            })
+                qty = safe_float(row['數量'])
+                if qty <= 0: continue
+                
+                # 判斷倉庫：Excel 指定 > 選單指定
+                this_wh = wh
+                if '倉庫' in df.columns and pd.notna(row['倉庫']):
+                    this_wh = str(row['倉庫']).strip()
+                    # 防呆：如果 Excel 裡的倉庫名不是系統設定的，歸類到第一個
+                    if this_wh not in WAREHOUSES: this_wh = WAREHOUSES[0]
+                
+                exist = inv[inv['貨號']==sku]
+                if not exist.empty:
+                    ser, cat, name = exist.iloc[0]['系列'], exist.iloc[0]['分類'], exist.iloc[0]['品名']
+                    spec = exist.iloc[0]['規格']
+                else:
+                    ser = row.get('系列','期初')
+                    cat = row.get('分類','期初')
+                    name = row.get('品名', f'未命名-{sku}')
+                    spec = row.get('規格','')
+                    
+                recs.append({
+                    '單據類型':'期初建檔', '單號':f"OPEN-{int(time.time())}-{sku}",
+                    '日期':str(date.today()), '系列':ser, '分類':cat, '品名':name, '貨號':sku, '規格':spec,
+                    '批號':f"INIT-{date.today():%Y%m%d}", '倉庫':this_wh, '數量':qty,
+                    'Key單者':'匯入', '進貨總成本': safe_float(row.get('進貨總成本',0)), '備註':'期初匯入'
+                })
+        
+        if not recs: return None, "讀取不到有效資料，請檢查欄位名稱。"
+        
         res_df = pd.DataFrame(recs)
+        # 確保所有欄位都存在，避免 concat 出錯
         for c in HISTORY_COLUMNS:
             if c not in res_df.columns: res_df[c] = ""
+            
         return res_df, "OK"
     except Exception as e: return None, str(e)
 
 def process_restore(file):
     try:
         df = pd.read_excel(file, sheet_name='完整流水帳')
-        for c in HISTORY_COLUMNS:
-            if c not in df.columns: df[c] = ""
-        df['數量'] = pd.to_numeric(df['數量'], errors='coerce').fillna(0)
-        df['進貨總成本'] = pd.to_numeric(df['進貨總成本'], errors='coerce').fillna(0)
-        return df
+        return normalize_history_data(df)
     except Exception as e: return None
     
 # ==========================================
@@ -436,7 +521,7 @@ with st.sidebar:
 
 if page == "📦 商品建檔與維護":
     st.subheader("📦 商品資料庫")
-    t1, t2, t3, t4, t5 = st.tabs(["✨ 建檔", "📂 匯入商品", "📥 匯入庫存", "⚙️ 編碼規則設定", "📋 檢視/修改"])
+    t1, t2, t3, t4, t5 = st.tabs(["✨ 建檔", "📂 匯入商品", "📥 匯入庫存", "⚙️ 編碼規則", "📋 檢視/修改"])
     
     with t4:
         st.info("請上傳包含 4 個分頁 (`類別規則`, `系列規則`, `品名規則`, `規格規則`) 的 Excel 檔。")
