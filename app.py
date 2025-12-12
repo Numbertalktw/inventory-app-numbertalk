@@ -18,8 +18,8 @@ import re
 
 PAGE_TITLE = "製造庫存系統" 
 
-INVENTORY_FILE = 'inventory_secure_v14.csv'
-HISTORY_FILE = 'history_secure_v14.csv'
+INVENTORY_FILE = 'inventory_secure_v15.csv'
+HISTORY_FILE = 'history_secure_v15.csv'
 RULES_FILE = 'sku_rules_composite_v2.xlsx' 
 ADMIN_PASSWORD = "8888"
 
@@ -44,10 +44,7 @@ INVENTORY_COLUMNS = [
     '庫存_Wen', '庫存_千畇', '庫存_James', '庫存_Imeng'
 ]
 
-# ★★★ 修改 1：清空預設系列，完全依賴您的 Excel 或手動輸入 ★★★
-DEFAULT_SERIES = [] 
-
-# 分類暫時保留預設值供參考，您也可以清空
+DEFAULT_SERIES = [] # 預設留空，完全依賴規則
 DEFAULT_CATEGORIES = ["天然石", "金屬配件", "線材", "包裝材料", "完成品"]
 DEFAULT_KEYERS = ["Wen", "千畇", "James", "Imeng", "小幫手"]
 
@@ -67,7 +64,6 @@ def get_safe_view(df):
     return df[safe_cols]
 
 def sort_inventory(df):
-    """自動排序函式：系列 -> 分類 -> 品名 -> 規格"""
     if df.empty: return df
     sort_keys = [col for col in ['系列', '分類', '品名', '規格'] if col in df.columns]
     if sort_keys:
@@ -170,6 +166,14 @@ def save_data():
     if 'history' in st.session_state:
         st.session_state['history'].to_csv(HISTORY_FILE, index=False, encoding='utf-8-sig')
 
+def save_rules_to_excel(rules_dict):
+    """將規則字典存回 Excel"""
+    with pd.ExcelWriter(RULES_FILE, engine='openpyxl') as writer:
+        name_map = {'category': '類別規則', 'series': '系列規則', 'name': '品名規則', 'spec': '規格規則'}
+        for key, df in rules_dict.items():
+            sheet_name = name_map.get(key, key)
+            df.to_excel(writer, index=False, sheet_name=sheet_name)
+
 def recalculate_inventory(hist_df, current_inv_df):
     new_inv = current_inv_df[INVENTORY_COLUMNS].copy()
     if not hist_df.empty:
@@ -235,28 +239,16 @@ def convert_to_excel_all_sheets(inv_df, hist_df):
     return output.getvalue()
 
 def get_dynamic_options(column_name, default_list):
-    """
-    [升級版] 選單邏輯：
-    1. 優先讀取 Rules 規則表 (Excel)
-    2. 其次讀取 Inventory 現有資料
-    3. 最後加上 Default list (若有)
-    """
     options = set(default_list)
-    
-    # 從現有庫存讀取
     if not st.session_state['inventory'].empty:
         existing = st.session_state['inventory'][column_name].dropna().unique().tolist()
         options.update([str(x) for x in existing if str(x).strip() != ""])
         
-    # ★★★ 新增：從規則表讀取 ★★★
     rules = st.session_state.get('sku_rules', {})
-    
-    # 對應規則表中的 key
     rule_key_map = {'系列': 'series', '分類': 'category'}
     if column_name in rule_key_map:
         rule_key = rule_key_map[column_name]
         if rule_key in rules and not rules[rule_key].empty:
-            # 讀取規則表中的「名稱」欄位加入選單
             rule_opts = rules[rule_key]['名稱'].astype(str).unique().tolist()
             options.update([x for x in rule_opts if x.strip() != ""])
 
@@ -292,8 +284,6 @@ def process_rules_upload_v2(file_obj):
         xls = pd.ExcelFile(file_obj)
         sheet_map_raw = {s.strip(): s for s in xls.sheet_names}
         required_map = {'類別規則': 'category', '系列規則': 'series', '品名規則': 'name', '規格規則': 'spec'}
-        
-        # 允許部分缺失，不強制報錯，只提示
         new_rules = {}
         found_info = []
         
@@ -431,34 +421,64 @@ with st.sidebar:
 
 if page == "📦 商品建檔與維護":
     st.subheader("📦 商品資料庫")
-    t1, t2, t3, t4, t5 = st.tabs(["✨ 建檔", "📂 匯入商品", "📥 匯入庫存", "⚙️ 編碼規則", "📋 檢視/修改"])
+    t1, t2, t3, t4, t5 = st.tabs(["✨ 建檔", "📂 匯入商品", "📥 匯入庫存", "⚙️ 編碼規則設定", "📋 檢視/修改"])
     
     with t4:
         st.info("請上傳包含 4 個分頁 (`類別規則`, `系列規則`, `品名規則`, `規格規則`) 的 Excel 檔。")
-        c1, c2 = st.columns([1, 2])
-        with c1:
+        
+        # ★★★ 新增功能：刪除規則 ★★★
+        c_up, c_del = st.columns([2, 1])
+        with c_up:
             up_rule = st.file_uploader("上傳規則 Excel", type=['xlsx'], key='rule_up')
             if up_rule and st.button("更新規則"):
                 new_rules, msg = process_rules_upload_v2(up_rule)
                 if new_rules is not None:
                     st.session_state['sku_rules'] = new_rules
-                    # 手動存檔
                     save_rules_to_excel(new_rules) 
                     st.success(f"規則更新成功：{msg}")
                     time.sleep(1); st.rerun()
                 else:
                     st.error(msg)
         
-        with c2:
-            st.caption("目前生效的規則預覽：")
-            rules = st.session_state['sku_rules']
-            for k, v in rules.items():
-                with st.expander(f"🔹 {k} ({len(v)} 筆)"):
-                    st.dataframe(v, use_container_width=True)
+        with c_del:
+            if st.button("🔴 清除所有規則", help="這將刪除所有上傳的規則並清空。"):
+                # 重置為空
+                empty_rules = {
+                    'category': pd.DataFrame(columns=['名稱', '代碼']),
+                    'series': pd.DataFrame(columns=['名稱', '代碼']),
+                    'name': pd.DataFrame(columns=['名稱', '代碼']),
+                    'spec': pd.DataFrame(columns=['名稱', '代碼'])
+                }
+                st.session_state['sku_rules'] = empty_rules
+                # 刪除實體檔案
+                if os.path.exists(RULES_FILE):
+                    os.remove(RULES_FILE)
+                st.success("規則已全部清除！")
+                time.sleep(1)
+                st.rerun()
+
+        st.divider()
+        st.caption("目前生效的規則預覽 (可直接在下方表格修改並按下「儲存變更」)：")
+        
+        # 使用 tabs 來分開顯示 4 種規則，避免畫面太長
+        rt1, rt2, rt3, rt4 = st.tabs(["類別", "系列", "品名", "規格"])
+        
+        # 輔助函式：顯示編輯器
+        def show_rule_editor(rule_key, label):
+            current_df = st.session_state['sku_rules'].get(rule_key, pd.DataFrame(columns=['名稱', '代碼']))
+            edited = st.data_editor(current_df, num_rows="dynamic", key=f"edit_{rule_key}", use_container_width=True)
+            if st.button(f"💾 儲存【{label}】變更", key=f"save_{rule_key}"):
+                st.session_state['sku_rules'][rule_key] = edited
+                save_rules_to_excel(st.session_state['sku_rules'])
+                st.success(f"{label} 已更新！")
+
+        with rt1: show_rule_editor('category', '類別規則')
+        with rt2: show_rule_editor('series', '系列規則')
+        with rt3: show_rule_editor('name', '品名規則')
+        with rt4: show_rule_editor('spec', '規格規則')
 
     with t1:
         c1, c2 = st.columns(2)
-        # ★★★ 升級：選單會自動包含「規則表」裡的選項 ★★★
         ser_opts = get_dynamic_options('系列', DEFAULT_SERIES)
         ser = c1.selectbox("系列", ser_opts)
         ser = st.text_input("輸入新系列") if ser == "➕ 手動輸入新資料" else ser
