@@ -44,7 +44,7 @@ INVENTORY_COLUMNS = [
     '庫存_Wen', '庫存_千畇', '庫存_James', '庫存_Imeng'
 ]
 
-DEFAULT_SERIES = [] # 預設留空，完全依賴規則
+DEFAULT_SERIES = [] 
 DEFAULT_CATEGORIES = ["天然石", "金屬配件", "線材", "包裝材料", "完成品"]
 DEFAULT_KEYERS = ["Wen", "千畇", "James", "Imeng", "小幫手"]
 
@@ -167,7 +167,6 @@ def save_data():
         st.session_state['history'].to_csv(HISTORY_FILE, index=False, encoding='utf-8-sig')
 
 def save_rules_to_excel(rules_dict):
-    """將規則字典存回 Excel"""
     with pd.ExcelWriter(RULES_FILE, engine='openpyxl') as writer:
         name_map = {'category': '類別規則', 'series': '系列規則', 'name': '品名規則', 'spec': '規格規則'}
         for key, df in rules_dict.items():
@@ -286,7 +285,6 @@ def process_rules_upload_v2(file_obj):
         required_map = {'類別規則': 'category', '系列規則': 'series', '品名規則': 'name', '規格規則': 'spec'}
         new_rules = {}
         found_info = []
-        
         for req_name, key in required_map.items():
             if req_name in sheet_map_raw:
                 df = pd.read_excel(xls, sheet_name=sheet_map_raw[req_name]).astype(str)
@@ -299,7 +297,6 @@ def process_rules_upload_v2(file_obj):
                     new_rules[key] = pd.DataFrame(columns=['名稱', '代碼'])
             else:
                 new_rules[key] = pd.DataFrame(columns=['名稱', '代碼'])
-        
         return new_rules, " / ".join(found_info)
     except Exception as e: return None, str(e)
 
@@ -423,12 +420,11 @@ if page == "📦 商品建檔與維護":
     st.subheader("📦 商品資料庫")
     t1, t2, t3, t4, t5 = st.tabs(["✨ 建檔", "📂 匯入商品", "📥 匯入庫存", "⚙️ 編碼規則設定", "📋 檢視/修改"])
     
+    # ★ 規則設定頁面 ★
     with t4:
         st.info("請上傳包含 4 個分頁 (`類別規則`, `系列規則`, `品名規則`, `規格規則`) 的 Excel 檔。")
-        
-        # ★★★ 新增功能：刪除規則 ★★★
-        c_up, c_del = st.columns([2, 1])
-        with c_up:
+        c1, c2 = st.columns([1, 2])
+        with c1:
             up_rule = st.file_uploader("上傳規則 Excel", type=['xlsx'], key='rule_up')
             if up_rule and st.button("更新規則"):
                 new_rules, msg = process_rules_upload_v2(up_rule)
@@ -440,9 +436,8 @@ if page == "📦 商品建檔與維護":
                 else:
                     st.error(msg)
         
-        with c_del:
-            if st.button("🔴 清除所有規則", help="這將刪除所有上傳的規則並清空。"):
-                # 重置為空
+        with c2:
+            if st.button("🔴 清除所有規則"):
                 empty_rules = {
                     'category': pd.DataFrame(columns=['名稱', '代碼']),
                     'series': pd.DataFrame(columns=['名稱', '代碼']),
@@ -450,32 +445,26 @@ if page == "📦 商品建檔與維護":
                     'spec': pd.DataFrame(columns=['名稱', '代碼'])
                 }
                 st.session_state['sku_rules'] = empty_rules
-                # 刪除實體檔案
-                if os.path.exists(RULES_FILE):
-                    os.remove(RULES_FILE)
-                st.success("規則已全部清除！")
-                time.sleep(1)
-                st.rerun()
+                if os.path.exists(RULES_FILE): os.remove(RULES_FILE)
+                st.success("規則已清除")
+                time.sleep(1); st.rerun()
 
-        st.divider()
-        st.caption("目前生效的規則預覽 (可直接在下方表格修改並按下「儲存變更」)：")
-        
-        # 使用 tabs 來分開顯示 4 種規則，避免畫面太長
-        rt1, rt2, rt3, rt4 = st.tabs(["類別", "系列", "品名", "規格"])
-        
-        # 輔助函式：顯示編輯器
-        def show_rule_editor(rule_key, label):
-            current_df = st.session_state['sku_rules'].get(rule_key, pd.DataFrame(columns=['名稱', '代碼']))
-            edited = st.data_editor(current_df, num_rows="dynamic", key=f"edit_{rule_key}", use_container_width=True)
-            if st.button(f"💾 儲存【{label}】變更", key=f"save_{rule_key}"):
-                st.session_state['sku_rules'][rule_key] = edited
-                save_rules_to_excel(st.session_state['sku_rules'])
-                st.success(f"{label} 已更新！")
+            st.caption("目前生效的規則預覽：")
+            # ★★★ 修改處：調整分頁顯示順序 ★★★
+            rt_series, rt_cat, rt_name, rt_spec = st.tabs(["系列", "類別", "品名", "規格"])
+            
+            def show_rule_editor(rule_key, label):
+                current_df = st.session_state['sku_rules'].get(rule_key, pd.DataFrame(columns=['名稱', '代碼']))
+                edited = st.data_editor(current_df, num_rows="dynamic", key=f"edit_{rule_key}", use_container_width=True)
+                if st.button(f"💾 儲存【{label}】變更", key=f"save_{rule_key}"):
+                    st.session_state['sku_rules'][rule_key] = edited
+                    save_rules_to_excel(st.session_state['sku_rules'])
+                    st.success(f"{label} 已更新！")
 
-        with rt1: show_rule_editor('category', '類別規則')
-        with rt2: show_rule_editor('series', '系列規則')
-        with rt3: show_rule_editor('name', '品名規則')
-        with rt4: show_rule_editor('spec', '規格規則')
+            with rt_series: show_rule_editor('series', '系列規則')
+            with rt_cat: show_rule_editor('category', '類別規則')
+            with rt_name: show_rule_editor('name', '品名規則')
+            with rt_spec: show_rule_editor('spec', '規格規則')
 
     with t1:
         c1, c2 = st.columns(2)
