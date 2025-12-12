@@ -18,8 +18,9 @@ import re
 
 PAGE_TITLE = "製造庫存系統" 
 
-INVENTORY_FILE = 'inventory_secure_v15.csv'
-HISTORY_FILE = 'history_secure_v15.csv'
+# 目前版本 (v16)
+INVENTORY_FILE = 'inventory_secure_v16.csv'
+HISTORY_FILE = 'history_secure_v16.csv'
 RULES_FILE = 'sku_rules_composite_v2.xlsx' 
 ADMIN_PASSWORD = "8888"
 
@@ -103,33 +104,54 @@ def filter_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def load_data():
-    if os.path.exists(INVENTORY_FILE):
-        try:
-            inv_df = pd.read_csv(INVENTORY_FILE)
-            rename_map = {'庫存_原物料倉': '庫存_Wen', '庫存_半成品倉': '庫存_千畇', '庫存_成品倉': '庫存_James', '庫存_報廢倉': '庫存_Imeng'}
-            inv_df = inv_df.rename(columns=rename_map)
-            for col in INVENTORY_COLUMNS:
-                if col not in inv_df.columns:
-                    inv_df[col] = 0.0 if '庫存' in col or '均價' in col else ""
-            inv_df['貨號'] = inv_df['貨號'].astype(str)
-            inv_df = sort_inventory(inv_df)
-        except: inv_df = pd.DataFrame(columns=INVENTORY_COLUMNS)
-    else: inv_df = pd.DataFrame(columns=INVENTORY_COLUMNS)
+    """
+    [升級] 自動尋找並繼承舊版本的資料 (v15 -> v16)
+    """
+    # 嘗試讀取 v16, 若無則讀取 v15
+    target_inv = INVENTORY_FILE
+    target_hist = HISTORY_FILE
+    
+    if not os.path.exists(INVENTORY_FILE) and os.path.exists('inventory_secure_v15.csv'):
+        target_inv = 'inventory_secure_v15.csv'
+        st.toast("⚠️ 偵測到舊版庫存資料 (v15)，已自動匯入並升級為 v16！", icon="🔄")
+        
+    if not os.path.exists(HISTORY_FILE) and os.path.exists('history_secure_v15.csv'):
+        target_hist = 'history_secure_v15.csv'
+        
+    # 1. 讀取庫存
+    try:
+        inv_df = pd.read_csv(target_inv)
+        # 修正舊欄位名稱
+        rename_map = {'庫存_原物料倉': '庫存_Wen', '庫存_半成品倉': '庫存_千畇', '庫存_成品倉': '庫存_James', '庫存_報廢倉': '庫存_Imeng'}
+        inv_df = inv_df.rename(columns=rename_map)
+        
+        # 補齊新欄位 (如: 規格)
+        for col in INVENTORY_COLUMNS:
+            if col not in inv_df.columns:
+                inv_df[col] = 0.0 if '庫存' in col or '均價' in col else ""
+        
+        inv_df['貨號'] = inv_df['貨號'].astype(str)
+        inv_df = sort_inventory(inv_df)
+    except:
+        inv_df = pd.DataFrame(columns=INVENTORY_COLUMNS)
 
-    if os.path.exists(HISTORY_FILE):
-        try:
-            hist_df = pd.read_csv(HISTORY_FILE)
-            if '倉庫' in hist_df.columns:
-                replace_map = {'原物料倉': 'Wen', '半成品倉': '千畇', '成品倉': 'James', '報廢倉': 'Imeng'}
-                hist_df['倉庫'] = hist_df['倉庫'].replace(replace_map)
-            for col in HISTORY_COLUMNS:
-                if col not in hist_df.columns:
-                    hist_df[col] = "" if col not in ['數量', '進貨總成本', '運費', '工資'] else 0
-            hist_df = hist_df[HISTORY_COLUMNS]
-            for c in ['數量', '進貨總成本', '運費', '工資']:
-                hist_df[c] = pd.to_numeric(hist_df[c], errors='coerce').fillna(0)
-        except: hist_df = pd.DataFrame(columns=HISTORY_COLUMNS)
-    else: hist_df = pd.DataFrame(columns=HISTORY_COLUMNS)
+    # 2. 讀取歷史
+    try:
+        hist_df = pd.read_csv(target_hist)
+        if '倉庫' in hist_df.columns:
+            replace_map = {'原物料倉': 'Wen', '半成品倉': '千畇', '成品倉': 'James', '報廢倉': 'Imeng'}
+            hist_df['倉庫'] = hist_df['倉庫'].replace(replace_map)
+            
+        for col in HISTORY_COLUMNS:
+            if col not in hist_df.columns:
+                hist_df[col] = "" if col not in ['數量', '進貨總成本', '運費', '工資'] else 0
+                
+        hist_df = hist_df[HISTORY_COLUMNS]
+        for c in ['數量', '進貨總成本', '運費', '工資']:
+            hist_df[c] = pd.to_numeric(hist_df[c], errors='coerce').fillna(0)
+    except:
+        hist_df = pd.DataFrame(columns=HISTORY_COLUMNS)
+        
     return inv_df, hist_df
 
 def load_rules():
@@ -239,10 +261,7 @@ def convert_to_excel_all_sheets(inv_df, hist_df):
 
 def get_dynamic_options(column_name, default_list):
     options = set(default_list)
-    if not st.session_state['inventory'].empty:
-        existing = st.session_state['inventory'][column_name].dropna().unique().tolist()
-        options.update([str(x) for x in existing if str(x).strip() != ""])
-        
+    # 不讀取庫存舊資料，只讀取規則
     rules = st.session_state.get('sku_rules', {})
     rule_key_map = {'系列': 'series', '分類': 'category'}
     if column_name in rule_key_map:
@@ -250,7 +269,6 @@ def get_dynamic_options(column_name, default_list):
         if rule_key in rules and not rules[rule_key].empty:
             rule_opts = rules[rule_key]['名稱'].astype(str).unique().tolist()
             options.update([x for x in rule_opts if x.strip() != ""])
-
     return sorted(list(options)) + ["➕ 手動輸入新資料"]
 
 def auto_generate_composite_sku(cat, ser, name, spec):
@@ -420,7 +438,6 @@ if page == "📦 商品建檔與維護":
     st.subheader("📦 商品資料庫")
     t1, t2, t3, t4, t5 = st.tabs(["✨ 建檔", "📂 匯入商品", "📥 匯入庫存", "⚙️ 編碼規則設定", "📋 檢視/修改"])
     
-    # ★ 規則設定頁面 ★
     with t4:
         st.info("請上傳包含 4 個分頁 (`類別規則`, `系列規則`, `品名規則`, `規格規則`) 的 Excel 檔。")
         c1, c2 = st.columns([1, 2])
@@ -450,7 +467,6 @@ if page == "📦 商品建檔與維護":
                 time.sleep(1); st.rerun()
 
             st.caption("目前生效的規則預覽：")
-            # ★★★ 修改處：調整分頁顯示順序 ★★★
             rt_series, rt_cat, rt_name, rt_spec = st.tabs(["系列", "類別", "品名", "規格"])
             
             def show_rule_editor(rule_key, label):
