@@ -340,3 +340,263 @@ if page == "📄 報表下載中心":
             data=out3.getvalue(),
             file_name=f"完整系統備份_{date.today()}.xlsx"
         )
+
+# ================================================
+# 📦 商品建檔與維護
+# ================================================
+if page == "📦 商品建檔與維護":
+
+    st.subheader("📦 商品建檔與維護")
+
+    inv = st.session_state["inventory"]
+
+    tab1, tab2 = st.tabs(["✨ 新增商品", "📋 商品清單"])
+
+    # -----------------------------
+    # ✨ 新增商品
+    # -----------------------------
+    with tab1:
+        col1, col2 = st.columns(2)
+
+        series = col1.text_input("系列")
+        category = col2.text_input("分類")
+
+        name = st.text_input("品名")
+        spec = st.text_input("規格")
+
+        sku = st.text_input("貨號", value=f"AUTO-{int(time.time())}")
+
+        if st.button("➕ 建立商品", type="primary"):
+            if not sku or not name:
+                st.error("🚨 貨號與品名必填")
+            else:
+                if sku in inv["貨號"].values:
+                    st.warning("⚠️ 此貨號已存在")
+                else:
+                    new_row = {
+                        "貨號": sku,
+                        "系列": series,
+                        "分類": category,
+                        "品名": name,
+                        "規格": spec,
+                        "總庫存": 0,
+                        "均價": 0,
+                        "庫存_Wen": 0,
+                        "庫存_千畇": 0,
+                        "庫存_James": 0,
+                        "庫存_Imeng": 0,
+                    }
+                    inv = pd.concat([inv, pd.DataFrame([new_row])], ignore_index=True)
+
+                    st.session_state["inventory"] = inv
+                    save_inventory(inv)
+
+                    st.success(f"✨ 已新增商品：{sku} - {name}")
+                    st.rerun()
+
+    # -----------------------------
+    # 📋 商品清單
+    # -----------------------------
+    with tab2:
+
+        df = st.session_state["inventory"]
+        df_show = filter_dataframe(df)
+
+        st.dataframe(df_show, use_container_width=True)
+
+        edited = st.data_editor(
+            df_show,
+            use_container_width=True,
+            num_rows="dynamic",
+            key="inv_edit",
+        )
+
+        if st.button("💾 儲存商品修改"):
+            # 依照索引同步回 inventory
+            for idx, row in edited.iterrows():
+                original_index = df.index[df["貨號"] == row["貨號"]].tolist()[0]
+                df.loc[original_index] = row
+
+            st.session_state["inventory"] = df
+            save_inventory(df)
+            st.success("已更新商品資料！")
+
+# ================================================
+# 📥 進貨庫存（無金額）
+# ================================================
+if page == "📥 進貨庫存":
+
+    st.subheader("📥 進貨庫存（無金額）")
+
+    inv = st.session_state["inventory"]
+    hist = st.session_state["history"]
+
+    if inv.empty:
+        st.info("目前沒有商品，請先前往「📦 商品建檔與維護」新增商品。")
+    else:
+        inv["label"] = inv["貨號"] + " | " + inv["品名"]
+
+        with st.expander("➕ 新增進貨單", expanded=True):
+
+            c1, c2 = st.columns([2, 1])
+            sel_item = c1.selectbox("選擇商品", inv["label"])
+            sel_wh = c2.selectbox("進貨入庫倉庫", WAREHOUSES)
+
+            c3, c4, c5 = st.columns(3)
+            qty = c3.number_input("進貨數量", min_value=1, value=1)
+            dt = c4.date_input("進貨日期", value=date.today())
+            keyer = c5.selectbox("經手人", ["Wen", "千畇", "James", "Imeng", "小幫手"])
+
+            c6, c7 = st.columns(2)
+            supplier = c6.text_input("廠商（可留空）")
+            note = c7.text_input("備註")
+
+            # ---- 儲存進貨記錄 ----
+            if st.button("📥 確認進貨", type="primary"):
+                row = inv[inv["label"] == sel_item].iloc[0]
+                sku = row["貨號"]
+
+                new_rec = {
+                    "單據類型": "進貨",
+                    "單號": f"IN-{int(time.time())}",
+                    "日期": str(dt),
+                    "系列": row["系列"],
+                    "分類": row["分類"],
+                    "品名": row["品名"],
+                    "規格": row["規格"],
+                    "貨號": sku,
+                    "批號": f"IN-{date.today():%Y%m%d}",
+                    "倉庫": sel_wh,
+                    "數量": qty,
+                    "Key單者": keyer,
+                    "廠商": supplier,
+                    "訂單單號": "",
+                    "出貨日期": "",
+                    "貨號備註": "",
+                    "運費": 0,
+                    "款項結清": "",
+                    "工資": 0,
+                    "發票": "",
+                    "備註": note,
+                    "進貨總成本": 0,
+                }
+
+                hist = pd.concat([hist, pd.DataFrame([new_rec])], ignore_index=True)
+
+                # 重新計算庫存
+                new_inv = recalc_inventory(hist, inv)
+
+                # 存回 session + DB
+                st.session_state["history"] = hist
+                st.session_state["inventory"] = new_inv
+                save_history(hist)
+                save_inventory(new_inv)
+
+                st.success(f"已成功新增進貨紀錄：{sku}  (+{qty})")
+                st.rerun()
+
+    # ========== 進貨紀錄表 ==============
+    st.write("### 📄 進貨紀錄列表")
+
+    df_view = hist[hist["單據類型"] == "進貨"].copy()
+
+    if df_view.empty:
+        st.info("目前尚無進貨紀錄。")
+    else:
+        df_filtered = filter_dataframe(df_view)
+        st.dataframe(df_filtered, use_container_width=True)
+
+# ================================================
+# 🚚 銷售出貨
+# ================================================
+if page == "🚚 銷售出貨":
+
+    st.subheader("🚚 銷售出貨")
+
+    inv = st.session_state["inventory"]
+    hist = st.session_state["history"]
+
+    if inv.empty:
+        st.info("目前沒有商品，請先前往「📦 商品建檔與維護」新增商品。")
+    else:
+        inv["label"] = inv["貨號"] + " | " + inv["品名"]
+
+        with st.expander("➖ 新增出貨單", expanded=True):
+
+            c1, c2 = st.columns([2, 1])
+            sel_item = c1.selectbox("出貨商品", inv["label"])
+            sel_wh = c2.selectbox("從哪個倉庫出貨", WAREHOUSES)
+
+            c3, c4, c5 = st.columns(3)
+            qty = c3.number_input("出貨數量", min_value=1, value=1)
+            fee = c4.number_input("運費（可留 0）", min_value=0.0, value=0.0)
+            dt = c5.date_input("出貨日期", value=date.today())
+
+            c6, c7 = st.columns(2)
+            ord_no = c6.text_input("訂單單號（可留空）")
+            keyer = c7.selectbox("經手人", ["Wen", "千畇", "James", "Imeng", "小幫手"])
+
+            note = st.text_input("備註（可留空）")
+
+            # ---- 出貨動作 ----
+            if st.button("📤 確認出貨", type="primary"):
+                row = inv[inv["label"] == sel_item].iloc[0]
+                sku = row["貨號"]
+
+                # *** 庫存不足警示 ***
+                curr_qty = float(row[f"庫存_{sel_wh}"])
+                if qty > curr_qty:
+                    st.error(f"❌ {sel_wh} 庫存不足！目前庫存：{curr_qty}")
+                else:
+                    new_rec = {
+                        "單據類型": "銷售出貨",
+                        "單號": f"OUT-{int(time.time())}",
+                        "日期": str(dt),
+                        "系列": row["系列"],
+                        "分類": row["分類"],
+                        "品名": row["品名"],
+                        "規格": row["規格"],
+                        "貨號": sku,
+                        "批號": "",
+                        "倉庫": sel_wh,
+                        "數量": qty,
+                        "Key單者": keyer,
+                        "廠商": "",
+                        "訂單單號": ord_no,
+                        "出貨日期": str(dt),
+                        "貨號備註": "",
+                        "運費": fee,
+                        "款項結清": "",
+                        "工資": 0,
+                        "發票": "",
+                        "備註": note,
+                        "進貨總成本": 0,
+                    }
+
+                    hist = pd.concat([hist, pd.DataFrame([new_rec])], ignore_index=True)
+
+                    # 重新計算庫存
+                    new_inv = recalc_inventory(hist, inv)
+
+                    # 存回 session + DB
+                    st.session_state["history"] = hist
+                    st.session_state["inventory"] = new_inv
+                    save_history(hist)
+                    save_inventory(new_inv)
+
+                    st.success(f"已成功出貨：{sku}  (-{qty})")
+                    st.rerun()
+
+
+    # =======================
+    # 出貨紀錄
+    # =======================
+    st.write("### 📄 出貨紀錄列表")
+
+    df_view = hist[hist["單據類型"] == "銷售出貨"].copy()
+
+    if df_view.empty:
+        st.info("目前尚無出貨紀錄。")
+    else:
+        df_filtered = filter_dataframe(df_view)
+        st.dataframe(df_filtered, use_container_width=True)
