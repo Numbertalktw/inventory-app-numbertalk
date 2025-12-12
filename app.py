@@ -44,9 +44,8 @@ INVENTORY_COLUMNS = [
     '庫存_Wen', '庫存_千畇', '庫存_James', '庫存_Imeng'
 ]
 
-# ★★★ 修改：全部清空，強制只讀取 Excel 規則 ★★★
 DEFAULT_SERIES = [] 
-DEFAULT_CATEGORIES = [] 
+DEFAULT_CATEGORIES = ["天然石", "金屬配件", "線材", "包裝材料", "完成品"]
 DEFAULT_KEYERS = ["Wen", "千畇", "James", "Imeng", "小幫手"]
 
 # ==========================================
@@ -239,16 +238,7 @@ def convert_to_excel_all_sheets(inv_df, hist_df):
     return output.getvalue()
 
 def get_dynamic_options(column_name, default_list):
-    """
-    [修改版] 僅從規則表讀取選項，不讀取舊資料庫存
-    """
     options = set(default_list)
-    
-    # ★★★ 修改：註解掉讀取現有庫存的邏輯，避免舊資料干擾 ★★★
-    # if not st.session_state['inventory'].empty:
-    #     existing = st.session_state['inventory'][column_name].dropna().unique().tolist()
-    #     options.update([str(x) for x in existing if str(x).strip() != ""])
-        
     rules = st.session_state.get('sku_rules', {})
     rule_key_map = {'系列': 'series', '分類': 'category'}
     if column_name in rule_key_map:
@@ -256,7 +246,6 @@ def get_dynamic_options(column_name, default_list):
         if rule_key in rules and not rules[rule_key].empty:
             rule_opts = rules[rule_key]['名稱'].astype(str).unique().tolist()
             options.update([x for x in rule_opts if x.strip() != ""])
-
     return sorted(list(options)) + ["➕ 手動輸入新資料"]
 
 def auto_generate_composite_sku(cat, ser, name, spec):
@@ -292,8 +281,15 @@ def process_rules_upload_v2(file_obj):
         new_rules = {}
         found_info = []
         for req_name, key in required_map.items():
-            if req_name in sheet_map_raw:
-                df = pd.read_excel(xls, sheet_name=sheet_map_raw[req_name]).astype(str)
+            # 模糊匹配分頁名稱
+            found_sheet = None
+            for s_name in sheet_map_raw.keys():
+                if req_name in s_name:
+                    found_sheet = s_name
+                    break
+            
+            if found_sheet:
+                df = pd.read_excel(xls, sheet_name=sheet_map_raw[found_sheet]).astype(str)
                 if df.shape[1] >= 2:
                     df = df.iloc[:, :2]
                     df.columns = ['名稱', '代碼']
@@ -307,50 +303,113 @@ def process_rules_upload_v2(file_obj):
     except Exception as e: return None, str(e)
 
 def process_product_upload(file):
+    """
+    [升級] 支援多 Sheet 讀取、自動忽略空白行、模糊欄位匹配
+    """
     try:
-        df = pd.read_csv(file) if file.name.endswith('.csv') else pd.read_excel(file)
-        rename = {'名稱':'品名','商品名稱':'品名','SKU':'貨號','類別':'分類'}
-        df = df.rename(columns=rename)
-        if '貨號' not in df.columns or '品名' not in df.columns: return None, "缺貨號或品名"
-        for c in ['系列','分類','規格']: 
-            if c not in df.columns: df[c] = '未分類'
-        return df[['貨號','品名','系列','分類','規格']].astype(str), "OK"
+        if file.name.endswith('.csv'):
+            dfs = [pd.read_csv(file)]
+        else:
+            xls = pd.ExcelFile(file)
+            dfs = [pd.read_excel(xls, sheet) for sheet in xls.sheet_names]
+            
+        final_df = pd.DataFrame()
+        
+        for df in dfs:
+            # 欄位正規化 (移除空白、轉小寫比對)
+            df.columns = [str(c).strip() for c in df.columns]
+            
+            # 建立別名對照表
+            rename_map = {}
+            for col in df.columns:
+                if col in ['名稱', '商品名稱', '品項', 'Product Name']: rename_map[col] = '品名'
+                elif col in ['SKU', '編號', '料號', 'Item Code', '商品貨號']: rename_map[col] = '貨號'
+                elif col in ['類別', '商品分類', 'Category', '群組']: rename_map[col] = '分類'
+                elif col in ['系列', 'Series']: rename_map[col] = '系列'
+                elif col in ['規格', '尺寸', 'Spec']: rename_map[col] = '規格'
+
+            df = df.rename(columns=rename_map)
+            
+            # 檢查關鍵欄位是否在 (至少要有貨號或品名)
+            if '貨號' in df.columns and '品名' in df.columns:
+                # 補齊欄位
+                for c in ['系列','分類','規格']: 
+                    if c not in df.columns: df[c] = '未分類'
+                
+                # 過濾無效行 (貨號為空)
+                df = df.dropna(subset=['貨號'])
+                df = df[df['貨號'].astype(str).str.strip() != '']
+                
+                # 選取需要的欄位合併
+                final_df = pd.concat([final_df, df[['貨號','品名','系列','分類','規格']]], ignore_index=True)
+        
+        if final_df.empty:
+            return None, "❌ 未找到有效資料。請確認 Excel 包含「貨號」與「品名」欄位。"
+            
+        return final_df.astype(str), "OK"
+
     except Exception as e: return None, str(e)
 
 def process_opening(file, wh):
+    """
+    [升級] 支援多 Sheet 讀取、模糊欄位匹配
+    """
     try:
-        df = pd.read_csv(file) if file.name.endswith('.csv') else pd.read_excel(file)
-        rename = {'名稱':'品名','SKU':'貨號','庫存':'數量','成本':'進貨總成本'}
-        df = df.rename(columns=rename)
-        if '貨號' not in df.columns or '數量' not in df.columns: return None, "缺貨號或數量"
-        
+        if file.name.endswith('.csv'):
+            dfs = [pd.read_csv(file)]
+        else:
+            xls = pd.ExcelFile(file)
+            dfs = [pd.read_excel(xls, sheet) for sheet in xls.sheet_names]
+            
         recs = []
         inv = st.session_state['inventory']
-        for _, row in df.iterrows():
-            sku = str(row['貨號'])
-            qty = safe_float(row['數量'])
-            if qty <= 0: continue
-            
-            exist = inv[inv['貨號']==sku]
-            if not exist.empty:
-                ser, cat, name = exist.iloc[0]['系列'], exist.iloc[0]['分類'], exist.iloc[0]['品名']
-                spec = exist.iloc[0]['規格']
-            else:
-                ser = row.get('系列','期初')
-                cat = row.get('分類','期初')
-                name = row.get('品名', f'未命名-{sku}')
-                spec = row.get('規格','')
+        
+        for df in dfs:
+            df.columns = [str(c).strip() for c in df.columns]
+            rename_map = {}
+            for col in df.columns:
+                if col in ['名稱', '品名']: rename_map[col] = '品名'
+                elif col in ['SKU', '貨號']: rename_map[col] = '貨號'
+                elif col in ['庫存', '現有庫存', '數量', 'Qty']: rename_map[col] = '數量'
+                elif col in ['成本', '進貨總成本', 'Cost']: rename_map[col] = '進貨總成本'
                 
-            recs.append({
-                '單據類型':'期初建檔', '單號':f"OPEN-{int(time.time())}-{sku}",
-                '日期':date.today(), '系列':ser, '分類':cat, '品名':name, '貨號':sku, '規格':spec,
-                '批號':f"INIT-{date.today():%Y%m%d}", '倉庫':wh, '數量':qty,
-                'Key單者':'匯入', '進貨總成本': safe_float(row.get('進貨總成本',0)), '備註':'期初匯入'
-            })
+            df = df.rename(columns=rename_map)
+            
+            if '貨號' not in df.columns or '數量' not in df.columns: continue
+
+            for _, row in df.iterrows():
+                sku = str(row['貨號']).strip()
+                if not sku: continue
+                
+                qty = safe_float(row['數量'])
+                if qty <= 0: continue
+                
+                # 找現有資料補齊
+                exist = inv[inv['貨號']==sku]
+                if not exist.empty:
+                    ser, cat, name = exist.iloc[0]['系列'], exist.iloc[0]['分類'], exist.iloc[0]['品名']
+                    spec = exist.iloc[0]['規格']
+                else:
+                    ser = row.get('系列','期初')
+                    cat = row.get('分類','期初')
+                    name = row.get('品名', f'未命名-{sku}')
+                    spec = row.get('規格','')
+                    
+                recs.append({
+                    '單據類型':'期初建檔', '單號':f"OPEN-{int(time.time())}-{sku}",
+                    '日期':date.today(), '系列':ser, '分類':cat, '品名':name, '貨號':sku, '規格':spec,
+                    '批號':f"INIT-{date.today():%Y%m%d}", '倉庫':wh, '數量':qty,
+                    'Key單者':'匯入', '進貨總成本': safe_float(row.get('進貨總成本',0)), '備註':'期初匯入'
+                })
+        
+        if not recs:
+            return None, "❌ 讀取不到有效庫存資料 (需包含貨號與數量)。"
+            
         res_df = pd.DataFrame(recs)
         for c in HISTORY_COLUMNS:
             if c not in res_df.columns: res_df[c] = ""
         return res_df, "OK"
+
     except Exception as e: return None, str(e)
 
 def process_restore(file):
@@ -424,7 +483,7 @@ with st.sidebar:
 
 if page == "📦 商品建檔與維護":
     st.subheader("📦 商品資料庫")
-    t1, t2, t3, t4, t5 = st.tabs(["✨ 建檔", "📂 匯入商品", "📥 匯入庫存", "⚙️ 編碼規則設定", "📋 檢視/修改"])
+    t1, t2, t3, t4, t5 = st.tabs(["✨ 建檔", "📂 匯入商品", "📥 匯入庫存", "⚙️ 編碼規則", "📋 檢視/修改"])
     
     with t4:
         st.info("請上傳包含 4 個分頁 (`類別規則`, `系列規則`, `品名規則`, `規格規則`) 的 Excel 檔。")
@@ -472,7 +531,6 @@ if page == "📦 商品建檔與維護":
 
     with t1:
         c1, c2 = st.columns(2)
-        # 僅顯示規則表中的選項，不顯示庫存舊資料
         ser_opts = get_dynamic_options('系列', DEFAULT_SERIES)
         ser = c1.selectbox("系列", ser_opts)
         ser = st.text_input("輸入新系列") if ser == "➕ 手動輸入新資料" else ser
