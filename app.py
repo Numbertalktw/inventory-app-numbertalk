@@ -18,6 +18,8 @@ ADMIN_PASSWORD = "8888"
 WAREHOUSES = ["Wen", "千畇", "James", "Imeng"]
 CATEGORIES = ["天然石", "金屬配件", "線材", "包裝材料", "完成品"]
 SERIES = ["原料", "半成品", "成品", "包材"]
+# ★★★ 新增：經手人選單 ★★★
+KEYERS = ["Wen", "千畇", "James", "Imeng", "小幫手"]
 
 # ==========================================
 # 2. 資料庫核心 (SQLite)
@@ -211,8 +213,13 @@ def process_batch_stock_update(file_obj, default_wh):
             diff = new_qty - current_qty
             
             if diff != 0:
-                doc_type = "庫存調整(加)" if diff > 0 else "庫存調整(減)"
-                note = f"批量匯入修正 (原:{current_qty} -> 新:{new_qty})"
+                if current_qty == 0 and diff > 0:
+                    doc_type = "期初建檔"
+                    note = "期初庫存匯入"
+                else:
+                    doc_type = "庫存調整(加)" if diff > 0 else "庫存調整(減)"
+                    note = f"批量匯入修正 (原:{current_qty} -> 新:{new_qty})"
+                
                 add_transaction(doc_type, str(date.today()), sku, target_wh, abs(diff), "系統匯入", note)
                 update_count += 1
             else:
@@ -221,9 +228,6 @@ def process_batch_stock_update(file_obj, default_wh):
     except Exception as e: return False, str(e)
 
 def get_history(doc_type_filter=None, start_date=None, end_date=None):
-    """
-    [升級] 取得歷史紀錄 (支援 多種類型篩選 + 日期範圍)
-    """
     conn = get_connection()
     query = """
     SELECT h.date as '日期', h.doc_type as '單據類型', h.doc_no as '單號',
@@ -236,7 +240,6 @@ def get_history(doc_type_filter=None, start_date=None, end_date=None):
     """
     params = []
     
-    # 類型篩選
     if doc_type_filter:
         if isinstance(doc_type_filter, list):
             placeholders = ','.join(['?'] * len(doc_type_filter))
@@ -246,12 +249,11 @@ def get_history(doc_type_filter=None, start_date=None, end_date=None):
             query += " AND h.doc_type LIKE ?"
             params.append(f"%{doc_type_filter}%")
     
-    # 日期篩選
     if start_date and end_date:
         query += " AND h.date BETWEEN ? AND ?"
         params.extend([str(start_date), str(end_date)])
 
-    query += " ORDER BY h.id DESC"
+    query += " ORDER BY h.id DESC LIMIT 50"
     
     try:
         df = pd.read_sql(query, conn, params=params)
@@ -261,10 +263,6 @@ def get_history(doc_type_filter=None, start_date=None, end_date=None):
     return df
 
 def get_period_summary(start_date, end_date):
-    """
-    [新功能] 期間進銷存統計
-    計算指定期間內的：進貨總量、出貨總量、製造產出、製造領料
-    """
     conn = get_connection()
     query = """
     SELECT h.sku, h.doc_type, SUM(h.qty) as total_qty
@@ -276,25 +274,19 @@ def get_period_summary(start_date, end_date):
         df_raw = pd.read_sql(query, conn, params=(str(start_date), str(end_date)))
         if df_raw.empty: return pd.DataFrame()
         
-        # 樞紐分析：將單據類型轉為欄位
         pivot = df_raw.pivot(index='sku', columns='doc_type', values='total_qty').fillna(0)
-        
-        # 補齊可能缺少的欄位
         for col in ['進貨', '銷售出貨', '製造入庫', '製造領料']:
             if col not in pivot.columns: pivot[col] = 0.0
             
-        # 讀取商品資料合併
         df_prod = pd.read_sql("SELECT sku, name, category, spec FROM products", conn)
-        result = pd.merge(df_prod, pivot, on='sku', how='inner') # 只顯示有交易的商品
+        result = pd.merge(df_prod, pivot, on='sku', how='inner')
         
-        # 整理欄位
         result = result.rename(columns={
             'sku': '貨號', 'name': '品名', 'category': '分類', 'spec': '規格',
             '進貨': '期間進貨量', '銷售出貨': '期間出貨量',
             '製造入庫': '期間生產量', '製造領料': '期間領料量'
         })
         
-        # 選擇顯示欄位
         cols = ['貨號', '分類', '品名', '規格', '期間進貨量', '期間出貨量', '期間生產量', '期間領料量']
         return result[[c for c in cols if c in result.columns]]
         
@@ -429,8 +421,11 @@ elif page == "📥 進貨作業":
             c3, c4 = st.columns(2)
             qty = c3.number_input("數量", min_value=1, value=1)
             date_val = c4.date_input("日期", date.today())
-            user = st.text_input("經手人", "User")
+            
+            # ★★★ 修改：經手人改為選單 ★★★
+            user = st.selectbox("經手人", KEYERS)
             note = st.text_input("備註")
+            
             if st.form_submit_button("確認進貨", type="primary"):
                 target_sku = sel_prod.split(" | ")[0]
                 if add_transaction("進貨", str(date_val), target_sku, wh, qty, user, note):
@@ -458,10 +453,14 @@ elif page == "🚚 出貨作業":
             c3, c4 = st.columns(2)
             qty = c3.number_input("數量", min_value=1, value=1)
             date_val = c4.date_input("日期", date.today())
+            
+            # ★★★ 修改：經手人改為選單 (出貨這裡原本沒經手人，現在加上) ★★★
+            user = st.selectbox("經手人", KEYERS)
             note = st.text_input("訂單編號 / 備註")
+            
             if st.form_submit_button("確認出貨", type="primary"):
                 target_sku = sel_prod.split(" | ")[0]
-                if add_transaction("銷售出貨", str(date_val), target_sku, wh, qty, "User", note):
+                if add_transaction("銷售出貨", str(date_val), target_sku, wh, qty, user, note):
                     st.success("出貨成功！")
                     time.sleep(0.5); st.rerun()
 
@@ -551,7 +550,6 @@ elif page == "⚖️ 庫存盤點":
 elif page == "📊 報表查詢":
     st.subheader("📊 數據報表中心")
     
-    # ★★★ 新增：報表分頁與下載 ★★★
     t1, t2, t3 = st.tabs(["📦 庫存總表", "📅 期間進銷存統計", "📜 分類明細下載"])
     
     with t1:
@@ -577,22 +575,18 @@ elif page == "📊 報表查詢":
     with t3:
         st.markdown("##### 下載詳細流水帳")
         c1, c2, c3, c4 = st.columns(4)
-        
         with c1:
             if st.button("📥 下載【進貨】明細"):
                 df = get_history(doc_type_filter="進貨")
                 st.download_button("點此下載", to_excel_download(df), "Inbound_Logs.xlsx")
-                
         with c2:
             if st.button("📥 下載【出貨】明細"):
                 df = get_history(doc_type_filter="銷售出貨")
                 st.download_button("點此下載", to_excel_download(df), "Outbound_Logs.xlsx")
-                
         with c3:
             if st.button("📥 下載【製造】明細"):
                 df = get_history(doc_type_filter=["製造領料", "製造入庫"])
                 st.download_button("點此下載", to_excel_download(df), "Manufacturing_Logs.xlsx")
-        
         with c4:
             if st.button("📜 下載【完整流水帳】"):
                 df = get_history()
