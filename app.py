@@ -20,7 +20,7 @@ CATEGORIES = ["天然石", "金屬配件", "線材", "包裝材料", "完成品"
 SERIES = ["原料", "半成品", "成品", "包材"]
 KEYERS = ["Wen", "千畇", "James", "Imeng", "小幫手"]
 
-# ★★★ 新增：預設庫存調整原因 ★★★
+# 預設庫存調整原因
 DEFAULT_REASONS = ["盤點差異", "報廢", "樣品借出", "系統修正", "其他"]
 
 # ==========================================
@@ -114,7 +114,6 @@ def get_all_products():
     return df
 
 def get_current_stock(sku, warehouse):
-    """查詢特定商品在特定倉庫的當前庫存"""
     conn = get_connection()
     c = conn.cursor()
     c.execute("SELECT qty FROM stock WHERE sku=? AND warehouse=?", (sku, warehouse))
@@ -185,20 +184,22 @@ def add_transaction(doc_type, date_str, sku, wh, qty, user, note, cost=0):
 
 def get_distinct_reasons():
     """
-    [新功能] 從歷史紀錄中獲取所有使用過的調整原因
+    [修改] 排除自動產生的批量匯入紀錄
     """
     conn = get_connection()
+    # 過濾掉包含 '批量' 或 '修正' 的原因
     query = """
     SELECT DISTINCT note 
     FROM history 
     WHERE doc_type LIKE '庫存調整%' 
     AND note IS NOT NULL 
     AND note != ''
+    AND note NOT LIKE '%批量%'
+    AND note NOT LIKE '%修正%'
     ORDER BY note
     """
     try:
         df = pd.read_sql(query, conn)
-        # 合併預設原因與歷史原因，並去重複
         historical_reasons = df['note'].tolist()
         all_reasons = sorted(list(set(DEFAULT_REASONS + historical_reasons)))
         return all_reasons
@@ -540,8 +541,8 @@ elif page == "⚖️ 庫存盤點":
         if not prods.empty:
             prods['label'] = prods['sku'] + " | " + prods['name']
             
-            # ★★★ 修改：自動學習的原因選單 ★★★
-            reason_options = get_distinct_reasons() # 獲取所有歷史原因
+            # 獲取過濾後的歷史原因
+            reason_options = get_distinct_reasons()
             reason_options.append("➕ 手動輸入新原因")
             
             with st.form("adj"):
@@ -553,10 +554,8 @@ elif page == "⚖️ 庫存盤點":
                 action = c3.radio("動作", ["增加 (+)", "減少 (-)"], horizontal=True)
                 qty = c4.number_input("調整數量", 1)
                 
-                # 原因選擇介面
                 sel_reason = st.selectbox("調整原因", reason_options)
                 
-                # 如果選了手動輸入，顯示文字框
                 if sel_reason == "➕ 手動輸入新原因":
                     final_reason = st.text_input("請輸入新原因")
                 else:
