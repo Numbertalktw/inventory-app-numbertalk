@@ -18,8 +18,10 @@ ADMIN_PASSWORD = "8888"
 WAREHOUSES = ["Wen", "千畇", "James", "Imeng"]
 CATEGORIES = ["天然石", "金屬配件", "線材", "包裝材料", "完成品"]
 SERIES = ["原料", "半成品", "成品", "包材"]
-# ★★★ 新增：經手人選單 ★★★
 KEYERS = ["Wen", "千畇", "James", "Imeng", "小幫手"]
+
+# ★★★ 新增：預設庫存調整原因 ★★★
+DEFAULT_REASONS = ["盤點差異", "報廢", "樣品借出", "系統修正", "其他"]
 
 # ==========================================
 # 2. 資料庫核心 (SQLite)
@@ -181,8 +183,31 @@ def add_transaction(doc_type, date_str, sku, wh, qty, user, note, cost=0):
     finally:
         conn.close()
 
+def get_distinct_reasons():
+    """
+    [新功能] 從歷史紀錄中獲取所有使用過的調整原因
+    """
+    conn = get_connection()
+    query = """
+    SELECT DISTINCT note 
+    FROM history 
+    WHERE doc_type LIKE '庫存調整%' 
+    AND note IS NOT NULL 
+    AND note != ''
+    ORDER BY note
+    """
+    try:
+        df = pd.read_sql(query, conn)
+        # 合併預設原因與歷史原因，並去重複
+        historical_reasons = df['note'].tolist()
+        all_reasons = sorted(list(set(DEFAULT_REASONS + historical_reasons)))
+        return all_reasons
+    except:
+        return DEFAULT_REASONS
+    finally:
+        conn.close()
+
 def process_batch_stock_update(file_obj, default_wh):
-    """批量庫存更新"""
     try:
         df = pd.read_csv(file_obj) if file_obj.name.endswith('.csv') else pd.read_excel(file_obj)
         df.columns = [str(c).strip() for c in df.columns]
@@ -422,7 +447,6 @@ elif page == "📥 進貨作業":
             qty = c3.number_input("數量", min_value=1, value=1)
             date_val = c4.date_input("日期", date.today())
             
-            # ★★★ 修改：經手人改為選單 ★★★
             user = st.selectbox("經手人", KEYERS)
             note = st.text_input("備註")
             
@@ -454,7 +478,6 @@ elif page == "🚚 出貨作業":
             qty = c3.number_input("數量", min_value=1, value=1)
             date_val = c4.date_input("日期", date.today())
             
-            # ★★★ 修改：經手人改為選單 (出貨這裡原本沒經手人，現在加上) ★★★
             user = st.selectbox("經手人", KEYERS)
             note = st.text_input("訂單編號 / 備註")
             
@@ -516,19 +539,38 @@ elif page == "⚖️ 庫存盤點":
     with t1:
         if not prods.empty:
             prods['label'] = prods['sku'] + " | " + prods['name']
+            
+            # ★★★ 修改：自動學習的原因選單 ★★★
+            reason_options = get_distinct_reasons() # 獲取所有歷史原因
+            reason_options.append("➕ 手動輸入新原因")
+            
             with st.form("adj"):
                 c1, c2 = st.columns(2)
                 sel = c1.selectbox("商品", prods['label'])
                 wh = c2.selectbox("倉庫", WAREHOUSES)
+                
                 c3, c4 = st.columns(2)
                 action = c3.radio("動作", ["增加 (+)", "減少 (-)"], horizontal=True)
                 qty = c4.number_input("調整數量", 1)
-                reason = st.text_input("原因", "盤點差異")
+                
+                # 原因選擇介面
+                sel_reason = st.selectbox("調整原因", reason_options)
+                
+                # 如果選了手動輸入，顯示文字框
+                if sel_reason == "➕ 手動輸入新原因":
+                    final_reason = st.text_input("請輸入新原因")
+                else:
+                    final_reason = sel_reason
+                
                 if st.form_submit_button("提交調整"):
-                    sku = sel.split(" | ")[0]
-                    type_name = "庫存調整(加)" if action == "增加 (+)" else "庫存調整(減)"
-                    add_transaction(type_name, str(date.today()), sku, wh, qty, "管理員", reason)
-                    st.success("調整完成！"); time.sleep(1); st.rerun()
+                    if not final_reason:
+                        st.error("請輸入調整原因")
+                    else:
+                        sku = sel.split(" | ")[0]
+                        type_name = "庫存調整(加)" if action == "增加 (+)" else "庫存調整(減)"
+                        add_transaction(type_name, str(date.today()), sku, wh, qty, "管理員", final_reason)
+                        st.success("調整完成！")
+                        time.sleep(1); st.rerun()
                     
     with t2:
         st.markdown("### 📥 上傳盤點結果")
