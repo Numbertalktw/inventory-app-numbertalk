@@ -20,6 +20,9 @@ CATEGORIES = ["天然石", "金屬配件", "線材", "包裝材料", "完成品"
 SERIES = ["原料", "半成品", "成品", "包材"]
 KEYERS = ["Wen", "千畇", "James", "Imeng", "小幫手"]
 
+# 常用貨運方式
+SHIPPING_METHODS = ["7-11", "全家", "萊爾富", "OK", "郵局", "順豐", "黑貓", "賣家宅配", "自取", "其他"]
+
 # 預設庫存調整原因
 DEFAULT_REASONS = ["盤點差異", "報廢", "樣品借出", "系統修正", "其他"]
 
@@ -71,6 +74,9 @@ def init_db():
             user TEXT,
             note TEXT,
             cost REAL,
+            shipping_method TEXT,
+            tracking_no TEXT,
+            shipping_fee REAL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -147,7 +153,7 @@ def get_stock_overview():
     
     return result[final_cols]
 
-def add_transaction(doc_type, date_str, sku, wh, qty, user, note, cost=0):
+def add_transaction(doc_type, date_str, sku, wh, qty, user, note, cost=0, shipping_method="", tracking_no="", shipping_fee=0):
     conn = get_connection()
     c = conn.cursor()
     try:
@@ -159,9 +165,9 @@ def add_transaction(doc_type, date_str, sku, wh, qty, user, note, cost=0):
         doc_no = f"{doc_prefix}-{int(time.time())}"
         
         c.execute('''
-            INSERT INTO history (doc_type, doc_no, date, sku, warehouse, qty, user, note, cost)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (doc_type, doc_no, date_str, sku, wh, qty, user, note, cost))
+            INSERT INTO history (doc_type, doc_no, date, sku, warehouse, qty, user, note, cost, shipping_method, tracking_no, shipping_fee)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (doc_type, doc_no, date_str, sku, wh, qty, user, note, cost, shipping_method, tracking_no, shipping_fee))
         
         factor = 1
         if doc_type in ['銷售出貨', '製造領料', '庫存調整(減)']:
@@ -183,11 +189,7 @@ def add_transaction(doc_type, date_str, sku, wh, qty, user, note, cost=0):
         conn.close()
 
 def get_distinct_reasons():
-    """
-    [修改] 排除自動產生的批量匯入紀錄
-    """
     conn = get_connection()
-    # 過濾掉包含 '批量' 或 '修正' 的原因
     query = """
     SELECT DISTINCT note 
     FROM history 
@@ -259,6 +261,7 @@ def get_history(doc_type_filter=None, start_date=None, end_date=None):
     SELECT h.date as '日期', h.doc_type as '單據類型', h.doc_no as '單號',
            p.series as '系列', p.category as '分類', p.name as '品名', p.spec as '規格',
            h.sku as '貨號', h.warehouse as '倉庫', h.qty as '數量', 
+           h.shipping_method as '貨運方式', h.tracking_no as '貨運單號', h.shipping_fee as '運費',
            h.user as '經手人', h.note as '備註'
     FROM history h
     LEFT JOIN products p ON h.sku = p.sku
@@ -323,7 +326,8 @@ def get_period_summary(start_date, end_date):
 
 def to_excel_download(df):
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+    # ★ 修改：移除 engine='xlsxwriter'，使用預設引擎避免錯誤
+    with pd.ExcelWriter(output) as writer:
         df.to_excel(writer, index=False)
     return output.getvalue()
 
@@ -479,12 +483,21 @@ elif page == "🚚 出貨作業":
             qty = c3.number_input("數量", min_value=1, value=1)
             date_val = c4.date_input("日期", date.today())
             
+            st.divider()
+            st.caption("📦 貨運資訊")
+            c5, c6, c7 = st.columns(3)
+            ship_method = c5.selectbox("貨運方式", SHIPPING_METHODS)
+            ship_fee = c6.number_input("運費", min_value=0, value=0)
+            track_no = c7.text_input("貨運單號", placeholder="請輸入單號")
+            
+            st.divider()
             user = st.selectbox("經手人", KEYERS)
             note = st.text_input("訂單編號 / 備註")
             
             if st.form_submit_button("確認出貨", type="primary"):
                 target_sku = sel_prod.split(" | ")[0]
-                if add_transaction("銷售出貨", str(date_val), target_sku, wh, qty, user, note):
+                if add_transaction("銷售出貨", str(date_val), target_sku, wh, qty, user, note, 
+                                   shipping_method=ship_method, tracking_no=track_no, shipping_fee=ship_fee):
                     st.success("出貨成功！")
                     time.sleep(0.5); st.rerun()
 
@@ -541,7 +554,6 @@ elif page == "⚖️ 庫存盤點":
         if not prods.empty:
             prods['label'] = prods['sku'] + " | " + prods['name']
             
-            # 獲取過濾後的歷史原因
             reason_options = get_distinct_reasons()
             reason_options.append("➕ 手動輸入新原因")
             
