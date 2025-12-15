@@ -12,7 +12,7 @@ import re
 # ==========================================
 PAGE_TITLE = "製造庫存系統 (DB專業版)"
 DB_FILE = "inventory_system.db"
-ADMIN_PASSWORD = "8888"  # ★ 主管密碼設定在這裡
+ADMIN_PASSWORD = "8888"
 
 # 固定選項
 WAREHOUSES = ["Wen", "千畇", "James", "Imeng"]
@@ -40,14 +40,15 @@ def init_db():
     conn = get_connection()
     c = conn.cursor()
     
-    # 1. 商品主檔
+    # 1. 商品主檔 (★ 修改：新增 avg_cost 欄位儲存移動平均成本)
     c.execute('''
         CREATE TABLE IF NOT EXISTS products (
             sku TEXT PRIMARY KEY,
             name TEXT,
             category TEXT,
             series TEXT,
-            spec TEXT
+            spec TEXT,
+            avg_cost REAL DEFAULT 0
         )
     ''')
     
@@ -61,7 +62,7 @@ def init_db():
         )
     ''')
     
-    # 3. 流水帳 (★ 修改：新增 unit_cost 欄位)
+    # 3. 流水帳
     c.execute('''
         CREATE TABLE IF NOT EXISTS history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -81,7 +82,6 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    # cost 欄位我們用來存 "總金額" (Total Amount)
     conn.commit()
     conn.close()
 
@@ -102,7 +102,8 @@ def add_product(sku, name, category, series, spec):
     conn = get_connection()
     c = conn.cursor()
     try:
-        c.execute("INSERT INTO products (sku, name, category, series, spec) VALUES (?, ?, ?, ?, ?)",
+        # 預設 avg_cost 為 0
+        c.execute("INSERT INTO products (sku, name, category, series, spec, avg_cost) VALUES (?, ?, ?, ?, ?, 0)",
                   (sku, name, category, series, spec))
         for wh in WAREHOUSES:
             c.execute("INSERT OR IGNORE INTO stock (sku, warehouse, qty) VALUES (?, ?, 0)", (sku, wh))
@@ -121,6 +122,23 @@ def get_all_products():
     conn.close()
     return df
 
+def get_product_avg_cost(sku):
+    """取得商品目前的平均成本"""
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("SELECT avg_cost FROM products WHERE sku=?", (sku,))
+    res = c.fetchone()
+    conn.close()
+    return res[0] if res else 0.0
+
+def update_product_avg_cost(sku, new_avg_cost):
+    """更新商品的平均成本"""
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("UPDATE products SET avg_cost=? WHERE sku=?", (new_avg_cost, sku))
+    conn.commit()
+    conn.close()
+
 def get_current_stock(sku, warehouse):
     conn = get_connection()
     c = conn.cursor()
@@ -128,6 +146,15 @@ def get_current_stock(sku, warehouse):
     res = c.fetchone()
     conn.close()
     return res[0] if res else 0.0
+
+def get_global_stock(sku):
+    """取得該商品在所有倉庫的總庫存"""
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("SELECT SUM(qty) FROM stock WHERE sku=?", (sku,))
+    res = c.fetchone()
+    conn.close()
+    return res[0] if res and res[0] is not None else 0.0
 
 def get_stock_overview():
     conn = get_connection()
@@ -150,16 +177,54 @@ def get_stock_overview():
     pivot['總庫存'] = pivot[WAREHOUSES].sum(axis=1)
     result = pd.merge(df_prod, pivot, on='sku', how='left').fillna(0)
     
-    cols = ['sku', 'series', 'category', 'name', 'spec', '總庫存'] + WAREHOUSES
+    cols = ['sku', 'series', 'category', 'name', 'spec', 'avg_cost', '總庫存'] + WAREHOUSES
     final_cols = [c for c in cols if c in result.columns]
     
-    return result[final_cols]
+    # 重新命名 avg_cost 方便閱讀
+    result = result[final_cols].rename(columns={'avg_cost': '平均成本'})
+    
+    return result
 
-# ★ 修改：add_transaction 增加 unit_cost 參數
+# ★ 修改：add_transaction 增加「移動平均成本」計算邏輯
 def add_transaction(doc_type, date_str, sku, wh, qty, user, note, unit_cost=0, cost=0, shipping_method="", tracking_no="", shipping_fee=0):
     conn = get_connection()
     c = conn.cursor()
     try:
+        # 1. 取得目前狀態
+        current_global_qty = get_global_stock(sku)
+        current_avg_cost = get_product_avg_cost(sku)
+        
+        # 2. 成本計算邏輯
+        final_unit_cost = 0.0
+        final_total_cost = 0.0
+        
+        # 【進貨類】：更新平均成本
+        if doc_type in ["進貨", "期初建檔", "製造入庫", "庫存調整(加)"]:
+            input_unit_cost = unit_cost if unit_cost > 0 else 0 # 這次進貨的單價
+            
+            # 計算新的平均成本：(原總值 + 新總值) / (原總數 + 新數量)
+            # 防呆：如果原本庫存是負的，計算會失準，這裡簡化處理：若總數 <=0 則直接用新成本
+            new_total_qty = current_global_qty + qty
+            
+            if new_total_qty > 0:
+                old_value = current_global_qty * current_avg_cost
+                new_value = qty * input_unit_cost
+                # 只有當「進貨單價 > 0」時才更新成本，避免免費入庫拉低成本 (看公司政策，這裡假設 0 元進貨不影響成本，或是您希望 0 元進貨拉低成本可拿掉 if)
+                if input_unit_cost > 0 or current_global_qty <= 0:
+                     new_avg_cost = (old_value + new_value) / new_total_qty
+                     update_product_avg_cost(sku, new_avg_cost)
+                     current_avg_cost = new_avg_cost # 更新當下成本變數
+            
+            final_unit_cost = input_unit_cost
+            final_total_cost = qty * input_unit_cost
+
+        # 【出貨類】：使用當下的平均成本作為售出成本
+        elif doc_type in ["銷售出貨", "製造領料", "庫存調整(減)"]:
+            # 出貨時，成本 = 數量 * 當前的平均成本
+            final_unit_cost = current_avg_cost
+            final_total_cost = qty * current_avg_cost
+            
+        # 3. 寫入流水帳
         doc_prefix = {
             "進貨": "IN", "銷售出貨": "OUT", "製造領料": "MO", "製造入庫": "PD",
             "庫存調整(加)": "ADJ+", "庫存調整(減)": "ADJ-", "期初建檔": "OPEN"
@@ -170,8 +235,9 @@ def add_transaction(doc_type, date_str, sku, wh, qty, user, note, unit_cost=0, c
         c.execute('''
             INSERT INTO history (doc_type, doc_no, date, sku, warehouse, qty, user, note, unit_cost, cost, shipping_method, tracking_no, shipping_fee)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (doc_type, doc_no, date_str, sku, wh, qty, user, note, unit_cost, cost, shipping_method, tracking_no, shipping_fee))
+        ''', (doc_type, doc_no, date_str, sku, wh, qty, user, note, final_unit_cost, final_total_cost, shipping_method, tracking_no, shipping_fee))
         
+        # 4. 更新庫存
         factor = 1
         if doc_type in ['銷售出貨', '製造領料', '庫存調整(減)']:
             factor = -1
@@ -222,6 +288,8 @@ def process_batch_stock_update(file_obj, default_wh):
             if c in ['SKU', '編號', '料號']: rename_map[c] = '貨號'
             if c in ['數量', '盤點數量', '實際數量', 'Qty', '庫存', '現有庫存']: rename_map[c] = '數量'
             if c in ['倉庫', 'Warehouse']: rename_map[c] = '倉庫'
+            # 支援 Excel 設定成本
+            if c in ['成本', '單價', 'Cost', 'Unit Cost']: rename_map[c] = '成本'
         df = df.rename(columns=rename_map)
         
         if '貨號' not in df.columns or '數量' not in df.columns:
@@ -235,6 +303,12 @@ def process_batch_stock_update(file_obj, default_wh):
             try: new_qty = float(row['數量'])
             except: continue 
             
+            # 讀取成本 (選填)
+            input_cost = 0.0
+            if '成本' in df.columns:
+                try: input_cost = float(row['成本'])
+                except: input_cost = 0.0
+
             target_wh = default_wh
             if '倉庫' in df.columns and pd.notna(row['倉庫']):
                 w_str = str(row['倉庫']).strip()
@@ -251,22 +325,21 @@ def process_batch_stock_update(file_obj, default_wh):
                     doc_type = "庫存調整(加)" if diff > 0 else "庫存調整(減)"
                     note = f"批量匯入修正 (原:{current_qty} -> 新:{new_qty})"
                 
-                # 批量匯入暫不記錄成本
-                add_transaction(doc_type, str(date.today()), sku, target_wh, abs(diff), "系統匯入", note)
+                # 這裡傳入 input_cost，讓 add_transaction 自動去更新平均成本
+                add_transaction(doc_type, str(date.today()), sku, target_wh, abs(diff), "系統匯入", note, unit_cost=input_cost)
                 update_count += 1
             else:
                 skip_count += 1
         return True, f"✅ 更新完成！已更新 {update_count} 筆，{skip_count} 筆無變動。"
     except Exception as e: return False, str(e)
 
-# ★ 修改：get_history 增加權限判斷，若無權限則不回傳成本欄位
 def get_history(is_manager=False, doc_type_filter=None, start_date=None, end_date=None):
     conn = get_connection()
     query = """
     SELECT h.date as '日期', h.doc_type as '單據類型', h.doc_no as '單號',
            p.series as '系列', p.category as '分類', p.name as '品名', p.spec as '規格',
            h.sku as '貨號', h.warehouse as '倉庫', h.qty as '數量', 
-           h.unit_cost as '單價', h.cost as '總金額',
+           h.unit_cost as '單價/成本', h.cost as '總金額/總成本',
            h.shipping_method as '貨運方式', h.tracking_no as '貨運單號', h.shipping_fee as '運費',
            h.user as '經手人', h.note as '備註'
     FROM history h
@@ -292,19 +365,16 @@ def get_history(is_manager=False, doc_type_filter=None, start_date=None, end_dat
     
     try:
         df = pd.read_sql(query, conn, params=params)
-        # ★ 如果不是主管，隱藏成本相關欄位
         if not is_manager:
-            drop_cols = ['單價', '總金額', '運費']
+            drop_cols = ['單價/成本', '總金額/總成本', '運費']
             df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors='ignore')
     except:
         df = pd.DataFrame()
     conn.close()
     return df
 
-# ★ 修改：get_period_summary 增加權限判斷
 def get_period_summary(start_date, end_date, is_manager=False):
     conn = get_connection()
-    # 增加 SUM(cost) 統計
     query = """
     SELECT h.sku, h.doc_type, SUM(h.qty) as total_qty, SUM(h.cost) as total_amt
     FROM history h
@@ -315,10 +385,8 @@ def get_period_summary(start_date, end_date, is_manager=False):
         df_raw = pd.read_sql(query, conn, params=(str(start_date), str(end_date)))
         if df_raw.empty: return pd.DataFrame()
         
-        # 數量 Pivot
         pivot_qty = df_raw.pivot(index='sku', columns='doc_type', values='total_qty').fillna(0)
         
-        # 金額 Pivot (只有主管需要)
         pivot_amt = pd.DataFrame()
         if is_manager:
             pivot_amt = df_raw.pivot(index='sku', columns='doc_type', values='total_amt').fillna(0)
@@ -328,11 +396,8 @@ def get_period_summary(start_date, end_date, is_manager=False):
             if col not in pivot_qty.columns: pivot_qty[col] = 0.0
             
         df_prod = pd.read_sql("SELECT sku, name, category, spec FROM products", conn)
-        
-        # 合併數量
         result = pd.merge(df_prod, pivot_qty, on='sku', how='inner')
         
-        # 如果是主管，合併金額
         if is_manager and not pivot_amt.empty:
             result = pd.merge(result, pivot_amt, on='sku', how='left').fillna(0)
         
@@ -343,15 +408,14 @@ def get_period_summary(start_date, end_date, is_manager=False):
         }
         if is_manager:
             rename_map.update({
-                '進貨_金額': '進貨成本', '銷售出貨_金額': '出貨金額'
+                '進貨_金額': '進貨總成本', '銷售出貨_金額': '銷貨總成本(COGS)'
             })
             
         result = result.rename(columns=rename_map)
         
-        # 欄位排序
         cols = ['貨號', '分類', '品名', '規格', '進貨量', '出貨量', '生產量', '領料量']
         if is_manager:
-            cols += ['進貨成本', '出貨金額']
+            cols += ['進貨總成本', '銷貨總成本(COGS)']
             
         return result[[c for c in cols if c in result.columns]]
         
@@ -378,8 +442,7 @@ init_db()
 
 st.title(f"🏭 {PAGE_TITLE}")
 
-# ★★★ 新增：主管權限登入區塊 ★★★
-is_manager = False # 預設為 False
+is_manager = False 
 
 with st.sidebar:
     st.header("功能選單")
@@ -394,7 +457,6 @@ with st.sidebar:
     
     st.divider()
     
-    # 🔐 主管登入機制
     with st.expander("🔐 主管權限 (查看成本)", expanded=False):
         mgr_pwd = st.text_input("輸入主管密碼", type="password", key="mgr_pwd")
         if mgr_pwd == ADMIN_PASSWORD:
@@ -471,7 +533,7 @@ if page == "📦 商品管理 (建檔/匯入)":
 
     with tab3:
         st.markdown("### 📥 批量匯入庫存")
-        st.info("請上傳包含 `貨號` 與 `數量` 的 Excel 檔。")
+        st.info("支援欄位：`貨號`、`數量`、`倉庫` (選填)、`成本` (選填，用於設定期初成本)。")
         wh_batch = st.selectbox("預設入庫倉庫", WAREHOUSES, key="wh_init")
         up_stock = st.file_uploader("上傳庫存盤點表", type=['xlsx', 'csv'], key='stock_up')
         if up_stock and st.button("開始匯入庫存"):
@@ -502,14 +564,13 @@ elif page == "📥 進貨作業":
             qty = c3.number_input("數量", min_value=1, value=1)
             date_val = c4.date_input("日期", date.today())
             
-            # ★★★ 新增：成本計算區塊 (只有主管看得到) ★★★
             unit_cost = 0.0
             total_cost = 0.0
             if is_manager:
                 st.markdown("---")
-                st.caption("💰 成本資訊 (僅主管可見)")
+                st.caption("💰 成本資訊 (僅主管可見，將自動計算移動平均成本)")
                 c_cost1, c_cost2 = st.columns(2)
-                unit_cost = c_cost1.number_input("進貨單價", min_value=0.0, value=0.0, step=1.0)
+                unit_cost = c_cost1.number_input("本批進貨單價", min_value=0.0, value=0.0, step=1.0)
                 total_cost = unit_cost * qty
                 c_cost2.metric("預估進貨總價", f"{total_cost:,.0f}")
                 st.markdown("---")
@@ -519,14 +580,12 @@ elif page == "📥 進貨作業":
             
             if st.form_submit_button("確認進貨", type="primary"):
                 target_sku = sel_prod.split(" | ")[0]
-                # 將成本傳入
                 if add_transaction("進貨", str(date_val), target_sku, wh, qty, user, note, unit_cost=unit_cost, cost=total_cost):
                     st.success("進貨成功！")
                     time.sleep(0.5); st.rerun()
 
         st.divider()
         st.markdown("#### 📜 最近進貨紀錄")
-        # 傳入 is_manager 判斷是否顯示成本
         df_hist = get_history(is_manager=is_manager, doc_type_filter="進貨")
         st.dataframe(df_hist, use_container_width=True)
 
@@ -560,6 +619,7 @@ elif page == "🚚 出貨作業":
             
             if st.form_submit_button("確認出貨", type="primary"):
                 target_sku = sel_prod.split(" | ")[0]
+                # 出貨時，系統會自動抓取平均成本記錄起來
                 if add_transaction("銷售出貨", str(date_val), target_sku, wh, qty, user, note, 
                                    shipping_method=ship_method, tracking_no=track_no, shipping_fee=ship_fee):
                     st.success("出貨成功！")
@@ -621,7 +681,6 @@ elif page == "⚖️ 庫存盤點":
     with t1:
         if not prods.empty:
             prods['label'] = prods['sku'] + " | " + prods['name']
-            
             reason_options = get_distinct_reasons()
             reason_options.append("➕ 手動輸入新原因")
             
@@ -629,27 +688,20 @@ elif page == "⚖️ 庫存盤點":
                 c1, c2 = st.columns(2)
                 sel = c1.selectbox("商品", prods['label'])
                 wh = c2.selectbox("倉庫", WAREHOUSES)
-                
                 c3, c4 = st.columns(2)
                 action = c3.radio("動作", ["增加 (+)", "減少 (-)"], horizontal=True)
                 qty = c4.number_input("調整數量", 1)
-                
                 sel_reason = st.selectbox("調整原因", reason_options)
-                
-                if sel_reason == "➕ 手動輸入新原因":
-                    final_reason = st.text_input("請輸入新原因")
-                else:
-                    final_reason = sel_reason
+                if sel_reason == "➕ 手動輸入新原因": final_reason = st.text_input("請輸入新原因")
+                else: final_reason = sel_reason
                 
                 if st.form_submit_button("提交調整"):
-                    if not final_reason:
-                        st.error("請輸入調整原因")
+                    if not final_reason: st.error("請輸入調整原因")
                     else:
                         sku = sel.split(" | ")[0]
                         type_name = "庫存調整(加)" if action == "增加 (+)" else "庫存調整(減)"
                         add_transaction(type_name, str(date.today()), sku, wh, qty, "管理員", final_reason)
-                        st.success("調整完成！")
-                        time.sleep(1); st.rerun()
+                        st.success("調整完成！"); time.sleep(1); st.rerun()
                     
     with t2:
         st.markdown("### 📥 上傳盤點結果")
@@ -662,21 +714,26 @@ elif page == "⚖️ 庫存盤點":
             else: st.error(msg)
     
     st.divider()
-    st.markdown("### 📦 目前即時庫存")
-    st.dataframe(get_stock_overview(), use_container_width=True)
+    st.markdown("### 📦 目前即時庫存 (僅主管可見平均成本)")
+    # 這裡顯示庫存表，如果不是主管，隱藏 avg_cost
+    df_overview = get_stock_overview()
+    if not is_manager and '平均成本' in df_overview.columns:
+        df_overview = df_overview.drop(columns=['平均成本'])
+    st.dataframe(df_overview, use_container_width=True)
 
 # ------------------------------------------------------------------
 # 6. 報表查詢
 # ------------------------------------------------------------------
 elif page == "📊 報表查詢":
     st.subheader("📊 數據報表中心")
-    if is_manager:
-        st.success("🔓 主管模式：已顯示成本與金額資訊")
+    if is_manager: st.success("🔓 主管模式：已顯示成本與金額資訊")
     
     t1, t2, t3 = st.tabs(["📦 庫存總表", "📅 期間進銷存統計", "📜 分類明細下載"])
     
     with t1:
         df = get_stock_overview()
+        if not is_manager: # 隱藏成本
+             df = df.drop(columns=['平均成本'], errors='ignore')
         st.dataframe(df, use_container_width=True)
         if not df.empty:
             st.download_button("📥 下載庫存現況表.xlsx", to_excel_download(df), f"Stock_{date.today()}.xlsx")
@@ -686,15 +743,12 @@ elif page == "📊 報表查詢":
         c1, c2 = st.columns(2)
         d_start = c1.date_input("開始日期", date.today().replace(day=1))
         d_end = c2.date_input("結束日期", date.today())
-        
         if st.button("生成期間報表"):
-            # 傳入 is_manager 決定是否顯示金額
             df_period = get_period_summary(d_start, d_end, is_manager)
             if not df_period.empty:
                 st.dataframe(df_period, use_container_width=True)
                 st.download_button("📥 下載期間統計表.xlsx", to_excel_download(df_period), f"Report_{d_start}_{d_end}.xlsx")
-            else:
-                st.info("此期間無交易紀錄")
+            else: st.info("此期間無交易紀錄")
 
     with t3:
         st.markdown("##### 下載詳細流水帳")
