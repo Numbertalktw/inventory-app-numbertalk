@@ -12,7 +12,7 @@ import re
 # ==========================================
 PAGE_TITLE = "製造庫存系統 (DB專業版)"
 DB_FILE = "inventory_system.db"
-ADMIN_PASSWORD = "8888"
+ADMIN_PASSWORD = "8888"  # ★ 主管密碼設定在這裡
 
 # 固定選項
 WAREHOUSES = ["Wen", "千畇", "James", "Imeng"]
@@ -61,7 +61,7 @@ def init_db():
         )
     ''')
     
-    # 3. 流水帳
+    # 3. 流水帳 (★ 修改：新增 unit_cost 欄位)
     c.execute('''
         CREATE TABLE IF NOT EXISTS history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -73,13 +73,15 @@ def init_db():
             qty REAL,
             user TEXT,
             note TEXT,
-            cost REAL,
+            unit_cost REAL,
+            cost REAL, 
             shipping_method TEXT,
             tracking_no TEXT,
             shipping_fee REAL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    # cost 欄位我們用來存 "總金額" (Total Amount)
     conn.commit()
     conn.close()
 
@@ -153,7 +155,8 @@ def get_stock_overview():
     
     return result[final_cols]
 
-def add_transaction(doc_type, date_str, sku, wh, qty, user, note, cost=0, shipping_method="", tracking_no="", shipping_fee=0):
+# ★ 修改：add_transaction 增加 unit_cost 參數
+def add_transaction(doc_type, date_str, sku, wh, qty, user, note, unit_cost=0, cost=0, shipping_method="", tracking_no="", shipping_fee=0):
     conn = get_connection()
     c = conn.cursor()
     try:
@@ -165,9 +168,9 @@ def add_transaction(doc_type, date_str, sku, wh, qty, user, note, cost=0, shippi
         doc_no = f"{doc_prefix}-{int(time.time())}"
         
         c.execute('''
-            INSERT INTO history (doc_type, doc_no, date, sku, warehouse, qty, user, note, cost, shipping_method, tracking_no, shipping_fee)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (doc_type, doc_no, date_str, sku, wh, qty, user, note, cost, shipping_method, tracking_no, shipping_fee))
+            INSERT INTO history (doc_type, doc_no, date, sku, warehouse, qty, user, note, unit_cost, cost, shipping_method, tracking_no, shipping_fee)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (doc_type, doc_no, date_str, sku, wh, qty, user, note, unit_cost, cost, shipping_method, tracking_no, shipping_fee))
         
         factor = 1
         if doc_type in ['銷售出貨', '製造領料', '庫存調整(減)']:
@@ -248,6 +251,7 @@ def process_batch_stock_update(file_obj, default_wh):
                     doc_type = "庫存調整(加)" if diff > 0 else "庫存調整(減)"
                     note = f"批量匯入修正 (原:{current_qty} -> 新:{new_qty})"
                 
+                # 批量匯入暫不記錄成本
                 add_transaction(doc_type, str(date.today()), sku, target_wh, abs(diff), "系統匯入", note)
                 update_count += 1
             else:
@@ -255,12 +259,14 @@ def process_batch_stock_update(file_obj, default_wh):
         return True, f"✅ 更新完成！已更新 {update_count} 筆，{skip_count} 筆無變動。"
     except Exception as e: return False, str(e)
 
-def get_history(doc_type_filter=None, start_date=None, end_date=None):
+# ★ 修改：get_history 增加權限判斷，若無權限則不回傳成本欄位
+def get_history(is_manager=False, doc_type_filter=None, start_date=None, end_date=None):
     conn = get_connection()
     query = """
     SELECT h.date as '日期', h.doc_type as '單據類型', h.doc_no as '單號',
            p.series as '系列', p.category as '分類', p.name as '品名', p.spec as '規格',
            h.sku as '貨號', h.warehouse as '倉庫', h.qty as '數量', 
+           h.unit_cost as '單價', h.cost as '總金額',
            h.shipping_method as '貨運方式', h.tracking_no as '貨運單號', h.shipping_fee as '運費',
            h.user as '經手人', h.note as '備註'
     FROM history h
@@ -286,15 +292,21 @@ def get_history(doc_type_filter=None, start_date=None, end_date=None):
     
     try:
         df = pd.read_sql(query, conn, params=params)
+        # ★ 如果不是主管，隱藏成本相關欄位
+        if not is_manager:
+            drop_cols = ['單價', '總金額', '運費']
+            df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors='ignore')
     except:
         df = pd.DataFrame()
     conn.close()
     return df
 
-def get_period_summary(start_date, end_date):
+# ★ 修改：get_period_summary 增加權限判斷
+def get_period_summary(start_date, end_date, is_manager=False):
     conn = get_connection()
+    # 增加 SUM(cost) 統計
     query = """
-    SELECT h.sku, h.doc_type, SUM(h.qty) as total_qty
+    SELECT h.sku, h.doc_type, SUM(h.qty) as total_qty, SUM(h.cost) as total_amt
     FROM history h
     WHERE h.date BETWEEN ? AND ?
     GROUP BY h.sku, h.doc_type
@@ -303,20 +315,44 @@ def get_period_summary(start_date, end_date):
         df_raw = pd.read_sql(query, conn, params=(str(start_date), str(end_date)))
         if df_raw.empty: return pd.DataFrame()
         
-        pivot = df_raw.pivot(index='sku', columns='doc_type', values='total_qty').fillna(0)
+        # 數量 Pivot
+        pivot_qty = df_raw.pivot(index='sku', columns='doc_type', values='total_qty').fillna(0)
+        
+        # 金額 Pivot (只有主管需要)
+        pivot_amt = pd.DataFrame()
+        if is_manager:
+            pivot_amt = df_raw.pivot(index='sku', columns='doc_type', values='total_amt').fillna(0)
+            pivot_amt.columns = [f"{c}_金額" for c in pivot_amt.columns]
+
         for col in ['進貨', '銷售出貨', '製造入庫', '製造領料']:
-            if col not in pivot.columns: pivot[col] = 0.0
+            if col not in pivot_qty.columns: pivot_qty[col] = 0.0
             
         df_prod = pd.read_sql("SELECT sku, name, category, spec FROM products", conn)
-        result = pd.merge(df_prod, pivot, on='sku', how='inner')
         
-        result = result.rename(columns={
+        # 合併數量
+        result = pd.merge(df_prod, pivot_qty, on='sku', how='inner')
+        
+        # 如果是主管，合併金額
+        if is_manager and not pivot_amt.empty:
+            result = pd.merge(result, pivot_amt, on='sku', how='left').fillna(0)
+        
+        rename_map = {
             'sku': '貨號', 'name': '品名', 'category': '分類', 'spec': '規格',
-            '進貨': '期間進貨量', '銷售出貨': '期間出貨量',
-            '製造入庫': '期間生產量', '製造領料': '期間領料量'
-        })
+            '進貨': '進貨量', '銷售出貨': '出貨量',
+            '製造入庫': '生產量', '製造領料': '領料量'
+        }
+        if is_manager:
+            rename_map.update({
+                '進貨_金額': '進貨成本', '銷售出貨_金額': '出貨金額'
+            })
+            
+        result = result.rename(columns=rename_map)
         
-        cols = ['貨號', '分類', '品名', '規格', '期間進貨量', '期間出貨量', '期間生產量', '期間領料量']
+        # 欄位排序
+        cols = ['貨號', '分類', '品名', '規格', '進貨量', '出貨量', '生產量', '領料量']
+        if is_manager:
+            cols += ['進貨成本', '出貨金額']
+            
         return result[[c for c in cols if c in result.columns]]
         
     except Exception as e:
@@ -326,7 +362,6 @@ def get_period_summary(start_date, end_date):
 
 def to_excel_download(df):
     output = io.BytesIO()
-    # ★ 關鍵修改：指定 engine='openpyxl'，保證雲端環境可執行，不會產生空白檔案
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False)
     return output.getvalue()
@@ -343,6 +378,9 @@ init_db()
 
 st.title(f"🏭 {PAGE_TITLE}")
 
+# ★★★ 新增：主管權限登入區塊 ★★★
+is_manager = False # 預設為 False
+
 with st.sidebar:
     st.header("功能選單")
     page = st.radio("前往", [
@@ -354,6 +392,17 @@ with st.sidebar:
         "📊 報表查詢"
     ])
     
+    st.divider()
+    
+    # 🔐 主管登入機制
+    with st.expander("🔐 主管權限 (查看成本)", expanded=False):
+        mgr_pwd = st.text_input("輸入主管密碼", type="password", key="mgr_pwd")
+        if mgr_pwd == ADMIN_PASSWORD:
+            is_manager = True
+            st.success("身分驗證成功")
+        elif mgr_pwd:
+            st.error("密碼錯誤")
+            
     st.divider()
     if st.button("🔴 初始化/重置資料庫"):
         reset_db()
@@ -448,22 +497,37 @@ elif page == "📥 進貨作業":
             c1, c2 = st.columns([2, 1])
             sel_prod = c1.selectbox("選擇商品", prods['label'])
             wh = c2.selectbox("入庫倉庫", WAREHOUSES, index=0)
+            
             c3, c4 = st.columns(2)
             qty = c3.number_input("數量", min_value=1, value=1)
             date_val = c4.date_input("日期", date.today())
+            
+            # ★★★ 新增：成本計算區塊 (只有主管看得到) ★★★
+            unit_cost = 0.0
+            total_cost = 0.0
+            if is_manager:
+                st.markdown("---")
+                st.caption("💰 成本資訊 (僅主管可見)")
+                c_cost1, c_cost2 = st.columns(2)
+                unit_cost = c_cost1.number_input("進貨單價", min_value=0.0, value=0.0, step=1.0)
+                total_cost = unit_cost * qty
+                c_cost2.metric("預估進貨總價", f"{total_cost:,.0f}")
+                st.markdown("---")
             
             user = st.selectbox("經手人", KEYERS)
             note = st.text_input("備註")
             
             if st.form_submit_button("確認進貨", type="primary"):
                 target_sku = sel_prod.split(" | ")[0]
-                if add_transaction("進貨", str(date_val), target_sku, wh, qty, user, note):
+                # 將成本傳入
+                if add_transaction("進貨", str(date_val), target_sku, wh, qty, user, note, unit_cost=unit_cost, cost=total_cost):
                     st.success("進貨成功！")
                     time.sleep(0.5); st.rerun()
 
         st.divider()
         st.markdown("#### 📜 最近進貨紀錄")
-        df_hist = get_history(doc_type_filter="進貨")
+        # 傳入 is_manager 判斷是否顯示成本
+        df_hist = get_history(is_manager=is_manager, doc_type_filter="進貨")
         st.dataframe(df_hist, use_container_width=True)
 
 # ------------------------------------------------------------------
@@ -503,7 +567,7 @@ elif page == "🚚 出貨作業":
 
         st.divider()
         st.markdown("#### 📜 最近出貨紀錄")
-        df_hist = get_history(doc_type_filter="銷售出貨")
+        df_hist = get_history(is_manager=is_manager, doc_type_filter="銷售出貨")
         st.dataframe(df_hist, use_container_width=True)
 
 # ------------------------------------------------------------------
@@ -523,7 +587,6 @@ elif page == "🔨 製造作業":
                 qty = st.number_input("領用量", 1, key='m3')
                 if st.form_submit_button("確認領料"):
                     sku = sel.split(" | ")[0]
-                    # 加入 if 判斷，確保交易成功才重整
                     if add_transaction("製造領料", str(date.today()), sku, wh, qty, "工廠", "領料"):
                         st.success("已扣除原料庫存")
                         time.sleep(0.5)
@@ -536,7 +599,6 @@ elif page == "🔨 製造作業":
                 qty = st.number_input("產出量", 1, key='p3')
                 if st.form_submit_button("完工入庫"):
                     sku = sel.split(" | ")[0]
-                    # 加入 if 判斷，確保交易成功才重整
                     if add_transaction("製造入庫", str(date.today()), sku, wh, qty, "工廠", "完工"):
                         st.success("成品已入庫")
                         time.sleep(0.5)
@@ -544,7 +606,7 @@ elif page == "🔨 製造作業":
 
         st.divider()
         st.markdown("#### 📜 最近製造紀錄")
-        df_hist = get_history(doc_type_filter=["製造領料", "製造入庫"])
+        df_hist = get_history(is_manager=is_manager, doc_type_filter=["製造領料", "製造入庫"])
         st.dataframe(df_hist, use_container_width=True)
     else: st.warning("請先建立商品資料！")
 
@@ -608,6 +670,8 @@ elif page == "⚖️ 庫存盤點":
 # ------------------------------------------------------------------
 elif page == "📊 報表查詢":
     st.subheader("📊 數據報表中心")
+    if is_manager:
+        st.success("🔓 主管模式：已顯示成本與金額資訊")
     
     t1, t2, t3 = st.tabs(["📦 庫存總表", "📅 期間進銷存統計", "📜 分類明細下載"])
     
@@ -624,7 +688,8 @@ elif page == "📊 報表查詢":
         d_end = c2.date_input("結束日期", date.today())
         
         if st.button("生成期間報表"):
-            df_period = get_period_summary(d_start, d_end)
+            # 傳入 is_manager 決定是否顯示金額
+            df_period = get_period_summary(d_start, d_end, is_manager)
             if not df_period.empty:
                 st.dataframe(df_period, use_container_width=True)
                 st.download_button("📥 下載期間統計表.xlsx", to_excel_download(df_period), f"Report_{d_start}_{d_end}.xlsx")
@@ -636,17 +701,17 @@ elif page == "📊 報表查詢":
         c1, c2, c3, c4 = st.columns(4)
         with c1:
             if st.button("📥 下載【進貨】明細"):
-                df = get_history(doc_type_filter="進貨")
+                df = get_history(is_manager=is_manager, doc_type_filter="進貨")
                 st.download_button("點此下載", to_excel_download(df), "Inbound_Logs.xlsx")
         with c2:
             if st.button("📥 下載【出貨】明細"):
-                df = get_history(doc_type_filter="銷售出貨")
+                df = get_history(is_manager=is_manager, doc_type_filter="銷售出貨")
                 st.download_button("點此下載", to_excel_download(df), "Outbound_Logs.xlsx")
         with c3:
             if st.button("📥 下載【製造】明細"):
-                df = get_history(doc_type_filter=["製造領料", "製造入庫"])
+                df = get_history(is_manager=is_manager, doc_type_filter=["製造領料", "製造入庫"])
                 st.download_button("點此下載", to_excel_download(df), "Manufacturing_Logs.xlsx")
         with c4:
             if st.button("📜 下載【完整流水帳】"):
-                df = get_history()
+                df = get_history(is_manager=is_manager)
                 st.download_button("點此下載", to_excel_download(df), "Full_Logs.xlsx")
