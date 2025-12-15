@@ -326,8 +326,8 @@ def get_period_summary(start_date, end_date):
 
 def to_excel_download(df):
     output = io.BytesIO()
-    # ★ 修改：移除 engine='xlsxwriter'，使用預設引擎避免錯誤
-    with pd.ExcelWriter(output) as writer:
+    # ★ 關鍵修改：指定 engine='openpyxl'，保證雲端環境可執行，不會產生空白檔案
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False)
     return output.getvalue()
 
@@ -523,8 +523,11 @@ elif page == "🔨 製造作業":
                 qty = st.number_input("領用量", 1, key='m3')
                 if st.form_submit_button("確認領料"):
                     sku = sel.split(" | ")[0]
-                    add_transaction("製造領料", str(date.today()), sku, wh, qty, "工廠", "領料")
-                    st.success("已扣除原料庫存"); time.sleep(0.5); st.rerun()
+                    # 加入 if 判斷，確保交易成功才重整
+                    if add_transaction("製造領料", str(date.today()), sku, wh, qty, "工廠", "領料"):
+                        st.success("已扣除原料庫存")
+                        time.sleep(0.5)
+                        st.rerun()
 
         with t2:
              with st.form("mo_in"):
@@ -533,8 +536,11 @@ elif page == "🔨 製造作業":
                 qty = st.number_input("產出量", 1, key='p3')
                 if st.form_submit_button("完工入庫"):
                     sku = sel.split(" | ")[0]
-                    add_transaction("製造入庫", str(date.today()), sku, wh, qty, "工廠", "完工")
-                    st.success("成品已入庫"); time.sleep(0.5); st.rerun()
+                    # 加入 if 判斷，確保交易成功才重整
+                    if add_transaction("製造入庫", str(date.today()), sku, wh, qty, "工廠", "完工"):
+                        st.success("成品已入庫")
+                        time.sleep(0.5)
+                        st.rerun()
 
         st.divider()
         st.markdown("#### 📜 最近製造紀錄")
