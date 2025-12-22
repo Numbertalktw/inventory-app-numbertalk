@@ -514,7 +514,7 @@ elif page == "🔨 製造作業":
                     st.success("已扣除原料庫存"); time.sleep(0.5); st.rerun()
 
         with t2:
-             with st.form("mo_in"):
+            with st.form("mo_in"):
                 sel = st.selectbox("成品", prods['label'], key='p1')
                 wh = st.selectbox("入庫倉", WAREHOUSES, key='p2')
                 qty = st.number_input("產出量", 1, key='p3')
@@ -594,10 +594,35 @@ elif page == "📊 報表查詢":
     t1, t2, t3 = st.tabs(["📦 庫存總表", "📅 期間進銷存統計", "📜 分類明細下載"])
     
     with t1:
+        st.markdown("#### 總庫存總覽")
         df = get_stock_overview()
         st.dataframe(df, use_container_width=True)
         if not df.empty:
-            st.download_button("📥 下載庫存現況表.xlsx", to_excel_download(df), f"Stock_{date.today()}.xlsx")
+            st.download_button("📥 下載完整庫存總表.xlsx", to_excel_download(df), f"Stock_All_{date.today()}.xlsx")
+            
+            st.divider()
+            st.markdown("#### 🏢 分倉庫存下載")
+            
+            # 建立多列佈局來放置按鈕
+            cols = st.columns(len(WAREHOUSES))
+            
+            for i, wh in enumerate(WAREHOUSES):
+                # 篩選該倉庫的資料
+                # 欄位包含：基本商品資訊 + 該倉庫的數量
+                target_cols = ['sku', 'series', 'category', 'name', 'spec', wh]
+                
+                # 確保這些欄位存在於 DataFrame 中
+                available_cols = [c for c in target_cols if c in df.columns]
+                
+                df_wh = df[available_cols].copy()
+                
+                # 在對應的欄位放置下載按鈕
+                with cols[i]:
+                    st.download_button(
+                        f"📥 {wh} 庫存表",
+                        to_excel_download(df_wh),
+                        f"Stock_{wh}_{date.today()}.xlsx"
+                    )
 
     with t2:
         st.markdown("##### 選擇統計期間")
