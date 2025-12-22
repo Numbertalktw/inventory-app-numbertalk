@@ -4,210 +4,267 @@ import sqlite3
 from datetime import date, datetime
 import time
 import io
-import uuid
 
 # ==========================================
-# 1. 系統設定
+# 1. 系統設定與初始化
 # ==========================================
-PAGE_TITLE = "製造庫存系統 (分流流水帳版)"
-DB_FILE = "inventory_system_batch.db"
+PAGE_TITLE = "製造庫存系統 (BOM & 成本管理版)"
+DB_FILE = "inventory_bom_system.db"
 ADMIN_PASSWORD = "8888"
 
 WAREHOUSES = ["Wen", "千畇", "James", "Imeng"]
-CATEGORIES = ["天然石", "金屬配件", "線材", "包裝材料", "完成品", "未分類"]
-SERIES = ["原料", "半成品", "成品", "包材", "未分類"]
+CATEGORIES = ["天然石", "金屬配件", "線材", "包裝材料", "完成品"]
+SERIES = ["原料", "半成品", "成品", "包材"]
 KEYERS = ["Wen", "千畇", "James", "Imeng", "小幫手"]
 SHIPPING_METHODS = ["7-11", "全家", "萊爾富", "OK", "郵局", "順豐", "黑貓", "賣家宅配", "自取", "其他"]
 
-# ==========================================
-# 2. 資料庫核心
-# ==========================================
 def get_connection():
     return sqlite3.connect(DB_FILE, check_same_thread=False)
 
 def init_db():
-    conn = get_connection(); c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS products (sku TEXT PRIMARY KEY, name TEXT, category TEXT, series TEXT, spec TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS stock (id INTEGER PRIMARY KEY AUTOINCREMENT, sku TEXT, warehouse TEXT, batch_id TEXT, supplier TEXT, unit_cost REAL, qty REAL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY AUTOINCREMENT, doc_type TEXT, doc_no TEXT, date TEXT, sku TEXT, warehouse TEXT, qty REAL, user TEXT, note TEXT, supplier TEXT, unit_cost REAL, cost REAL, shipping_method TEXT, tracking_no TEXT, shipping_fee REAL, batch_id TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    conn.commit(); conn.close()
-
-# --- 核心操作函式 ---
-def add_or_update_product(sku, name, category, series, spec=""):
-    conn = get_connection(); c = conn.cursor()
-    c.execute('''INSERT INTO products (sku, name, category, series, spec) VALUES (?, ?, ?, ?, ?)
-                 ON CONFLICT(sku) DO UPDATE SET name=excluded.name, category=excluded.category, series=excluded.series, spec=excluded.spec''', (sku, name, category, series, spec))
-    conn.commit(); conn.close()
-
-def add_transaction_in(date_str, sku, wh, qty, user, note, supplier="", unit_cost=0, doc_type="進貨"):
-    conn = get_connection(); c = conn.cursor()
-    try:
-        batch_id = f"B{date_str.replace('-','')}-{uuid.uuid4().hex[:4].upper()}"
-        c.execute("INSERT INTO stock (sku, warehouse, batch_id, supplier, unit_cost, qty) VALUES (?, ?, ?, ?, ?, ?)", (sku, wh, batch_id, supplier, unit_cost, qty))
-        doc_prefix = {"進貨": "IN", "期初建檔": "OPEN", "製造入庫": "PD", "庫存調整(加)": "ADJ+"}.get(doc_type, "DOC")
-        doc_no = f"{doc_prefix}-{int(time.time()*1000)}"
-        c.execute("INSERT INTO history (doc_type, doc_no, date, sku, warehouse, qty, user, note, supplier, unit_cost, cost, batch_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (doc_type, doc_no, date_str, sku, wh, qty, user, note, supplier, unit_cost, qty * unit_cost, batch_id))
-        conn.commit(); return True
-    except: return False
-    finally: conn.close()
-
-def add_transaction_out(date_str, stock_id, qty, user, note, doc_type="銷售出貨", ship="", track="", fee=0):
-    conn = get_connection(); c = conn.cursor()
-    try:
-        c.execute("SELECT sku, warehouse, batch_id, supplier, unit_cost, qty FROM stock WHERE id=?", (stock_id,))
-        row = c.fetchone()
-        if not row or row[5] < qty: return False
-        c.execute("UPDATE stock SET qty = qty - ? WHERE id = ?", (qty, stock_id))
-        doc_prefix = {"銷售出貨": "OUT", "製造領料": "MO", "庫存調整(減)": "ADJ-"}.get(doc_type, "DOC")
-        doc_no = f"{doc_prefix}-{int(time.time())}"
-        c.execute("INSERT INTO history (doc_type, doc_no, date, sku, warehouse, qty, user, note, supplier, unit_cost, cost, shipping_method, tracking_no, shipping_fee, batch_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (doc_type, doc_no, date_str, row[0], row[1], qty, user, note, row[3], row[4], qty * row[4], ship, track, fee, row[2]))
-        conn.commit(); return True
-    except: return False
-    finally: conn.close()
-
-def get_stock_overview():
-    conn = get_connection(); df_prod = pd.read_sql("SELECT * FROM products", conn); df_stock = pd.read_sql("SELECT sku, warehouse, SUM(qty) as qty FROM stock GROUP BY sku, warehouse", conn); conn.close()
-    if df_prod.empty: return pd.DataFrame()
-    pivot = df_stock.pivot(index='sku', columns='warehouse', values='qty').fillna(0)
-    for wh in WAREHOUSES: 
-        if wh not in pivot.columns: pivot[wh] = 0.0
-    pivot['總庫存'] = pivot[WAREHOUSES].sum(axis=1)
-    res = pd.merge(df_prod, pivot, on='sku', how='left').fillna(0)
-    return res[['sku', 'series', 'category', 'name', 'spec', '總庫存'] + WAREHOUSES]
+    conn = get_connection()
+    c = conn.cursor()
+    # 商品主檔
+    c.execute('''CREATE TABLE IF NOT EXISTS products 
+                 (sku TEXT PRIMARY KEY, name TEXT, category TEXT, series TEXT, spec TEXT)''')
+    # 批次庫存
+    c.execute('''CREATE TABLE IF NOT EXISTS stock 
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, sku TEXT, warehouse TEXT, batch_id TEXT, 
+                  supplier TEXT, unit_cost REAL, qty REAL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    # 異動歷史
+    c.execute('''CREATE TABLE IF NOT EXISTS history 
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, doc_type TEXT, doc_no TEXT, date TEXT, 
+                  sku TEXT, warehouse TEXT, qty REAL, user TEXT, note TEXT, supplier TEXT, 
+                  unit_cost REAL, cost REAL, shipping_method TEXT, tracking_no TEXT, 
+                  shipping_fee REAL, batch_id TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    # BOM 配方表
+    c.execute('''CREATE TABLE IF NOT EXISTS bom 
+                 (parent_sku TEXT, child_sku TEXT, quantity REAL, PRIMARY KEY (parent_sku, child_sku))''')
+    conn.commit()
+    conn.close()
 
 # ==========================================
-# 4. Streamlit UI
+# 2. 資料運算核心 (邏輯層)
+# ==========================================
+
+def get_weighted_average_cost(sku):
+    """計算原料目前的加權平均成本 (主管視角)"""
+    conn = get_connection()
+    res = conn.execute("SELECT SUM(qty * unit_cost), SUM(qty) FROM stock WHERE sku = ? AND qty > 0", (sku,)).fetchone()
+    conn.close()
+    if res and res[1] and res[1] > 0:
+        return res[0] / res[1]
+    return 0.0
+
+def check_bom_shortage(parent_sku, target_qty, warehouse):
+    """檢查生產所需的原料是否充足"""
+    conn = get_connection()
+    query = """
+        SELECT b.child_sku, p.name, b.quantity, 
+               (SELECT SUM(qty) FROM stock WHERE sku = b.child_sku AND warehouse = ?) as current_stock
+        FROM bom b
+        LEFT JOIN products p ON b.child_sku = p.sku
+        WHERE b.parent_sku = ?
+    """
+    df = pd.read_sql(query, conn, params=(warehouse, parent_sku))
+    conn.close()
+    shortage = []
+    for _, row in df.iterrows():
+        needed = row['quantity'] * target_qty
+        stock = row['current_stock'] if row['current_stock'] else 0
+        if stock < needed:
+            shortage.append({"原料": f"{row['child_sku']} {row['name']}", "需求": needed, "現有": stock, "缺口": needed - stock})
+    return shortage
+
+def auto_deduct_with_cost_calculation(parent_sku, produce_qty, warehouse, user):
+    """執行 FIFO 自動扣料生產並計算成品成本"""
+    conn = get_connection()
+    c = conn.cursor()
+    total_material_cost = 0.0
+    try:
+        c.execute("BEGIN TRANSACTION")
+        c.execute("SELECT child_sku, quantity FROM bom WHERE parent_sku = ?", (parent_sku,))
+        recipe = c.fetchall()
+        
+        for child_sku, unit_qty in recipe:
+            needed = unit_qty * produce_qty
+            c.execute("SELECT id, qty, unit_cost, batch_id, supplier FROM stock WHERE sku = ? AND warehouse = ? AND qty > 0 ORDER BY created_at ASC", (child_sku, warehouse))
+            batches = c.fetchall()
+            
+            for b_id, b_qty, b_cost, b_batch_id, b_supp in batches:
+                if needed <= 0: break
+                take = min(needed, b_qty)
+                total_material_cost += (take * b_cost)
+                c.execute("UPDATE stock SET qty = qty - ? WHERE id = ?", (take, b_id))
+                # 記錄領料歷史
+                c.execute("INSERT INTO history (doc_type, doc_no, date, sku, warehouse, qty, user, note, supplier, unit_cost, cost, batch_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                          ("製造領料", f"MO-AUTO-{int(time.time())}", str(date.today()), child_sku, warehouse, take, user, f"生產{parent_sku}自動領料", b_supp, b_cost, take*b_cost, b_batch_id))
+                needed -= take
+        
+        # 成品入庫
+        final_unit_cost = total_material_cost / produce_qty if produce_qty > 0 else 0
+        batch_id = f"B-PROD-{int(time.time())}"
+        c.execute("INSERT INTO stock (sku, warehouse, batch_id, supplier, unit_cost, qty) VALUES (?,?,?,?,?,?)",
+                  (parent_sku, warehouse, batch_id, "內部生產", final_unit_cost, produce_qty))
+        c.execute("INSERT INTO history (doc_type, doc_no, date, sku, warehouse, qty, user, note, supplier, unit_cost, cost, batch_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                  ("製造入庫", f"PD-{int(time.time())}", str(date.today()), parent_sku, warehouse, produce_qty, user, "BOM自動化生產", "自製", final_unit_cost, total_material_cost, batch_id))
+        
+        conn.commit()
+        return True, final_unit_cost
+    except Exception as e:
+        conn.rollback()
+        return False, str(e)
+    finally:
+        conn.close()
+
+# ==========================================
+# 3. UI 介面層
 # ==========================================
 st.set_page_config(page_title=PAGE_TITLE, layout="wide")
 init_db()
 
 st.title(f"🏭 {PAGE_TITLE}")
-is_manager = False 
 
+# 權限驗證
+is_manager = False
 with st.sidebar:
     st.header("功能選單")
-    page = st.radio("前往", ["📦 庫存總覽與匯入", "📥 進貨作業", "🚚 銷售出貨", "🔨 製造作業", "📊 流水帳報表"])
+    page = st.radio("前往", ["📦 商品建檔", "📥 進貨作業", "🚚 出貨作業", "🔨 製造與BOM", "📊 報表查詢"])
     st.divider()
     with st.expander("🔐 主管權限"):
-        if st.text_input("輸入管理密碼", type="password") == ADMIN_PASSWORD:
-            is_manager = True; st.success("主管模式開啟")
-    if st.button("⚠️ 重置系統"):
-        conn = get_connection(); c = conn.cursor(); c.execute("DROP TABLE IF EXISTS products"); c.execute("DROP TABLE IF EXISTS stock"); c.execute("DROP TABLE IF EXISTS history"); conn.commit(); conn.close(); init_db(); st.rerun()
+        if st.text_input("密碼", type="password") == ADMIN_PASSWORD:
+            is_manager = True
+            st.success("主管模式已開啟")
 
-# --- 頁面邏輯 ---
-
-if page == "📦 庫存總覽與匯入":
-    t1, t2 = st.tabs(["📊 現有庫存總表", "📥 批量匯入"])
-    with t1: st.dataframe(get_stock_overview(), use_container_width=True)
-    with t2:
-        up = st.file_uploader("上傳 Excel 總表", type=["xlsx", "csv"])
-        if up and st.button("執行匯入"):
+# --- 1. 商品建檔 ---
+if page == "📦 商品建檔":
+    st.subheader("📦 商品資料維護")
+    with st.form("add_prod"):
+        c1, c2, c3, c4 = st.columns(4)
+        sku = c1.text_input("貨號 (SKU)")
+        name = c2.text_input("品名")
+        cat = c3.selectbox("分類", CATEGORIES)
+        ser = c4.selectbox("系列", SERIES)
+        if st.form_submit_button("新增商品"):
+            conn = get_connection()
             try:
-                df = pd.read_excel(up) if up.name.endswith('.xlsx') else pd.read_csv(up)
-                df.columns = [str(c).strip() for c in df.columns]
-                sku_col = next((c for c in df.columns if 'sku' in c.lower() or '貨號' in c.lower()), None)
-                for _, row in df.iterrows():
-                    sku = str(row[sku_col]).strip()
-                    if not sku or sku == 'nan': continue
-                    add_or_update_product(sku, str(row.get('Name', '未命名')), str(row.get('Category', '未分類')), str(row.get('Series', '未分類')))
-                    for wh in WAREHOUSES:
-                        if wh in df.columns and pd.notna(row[wh]) and float(row[wh]) > 0:
-                            add_transaction_in(str(date.today()), sku, wh, float(row[wh]), "系統匯入", "期初匯入", doc_type="期初建檔")
-                st.success("匯入成功！"); st.rerun()
-            except Exception as e: st.error(f"錯誤: {e}")
+                conn.execute("INSERT INTO products VALUES (?,?,?,?,?)", (sku, name, cat, ser, ""))
+                conn.commit()
+                st.success("新增成功")
+            except: st.error("貨號重複")
+            finally: conn.close()
+    
+    df_p = pd.read_sql("SELECT * FROM products", get_connection())
+    st.dataframe(df_p, use_container_width=True)
 
+# --- 2. 進貨作業 ---
 elif page == "📥 進貨作業":
-    st.subheader("📥 進貨入庫")
+    st.subheader("📥 進貨入庫 (建立新批次)")
     prods = pd.read_sql("SELECT sku, name FROM products", get_connection())
+    prod_opts = [f"{r['sku']} | {r['name']}" for _, r in prods.iterrows()]
+    
     with st.form("in_form"):
-        sku = st.selectbox("選擇商品", [f"{r['sku']} | {r['name']}" for _, r in prods.iterrows()]).split(" | ")[0]
-        wh = st.selectbox("倉庫", WAREHOUSES); qty = st.number_input("數量", min_value=0.01)
-        cost = st.number_input("單價", min_value=0.0) if is_manager else 0.0
-        supp = st.text_input("供應商"); user = st.selectbox("經手人", KEYERS)
-        if st.form_submit_button("確認入庫"):
-            if add_transaction_in(str(date.today()), sku, wh, qty, user, "手動進貨", supp, cost):
-                st.success("入庫成功"); st.rerun()
-
-elif page == "🚚 銷售出貨":
-    st.subheader("🚚 銷售出貨")
-    conn = get_connection(); df_s = pd.read_sql("SELECT s.id, s.sku, p.name, s.qty, s.warehouse, s.batch_id FROM stock s JOIN products p ON s.sku = p.sku WHERE s.qty > 0", conn); conn.close()
-    if not df_s.empty:
-        with st.form("out_form"):
-            sel = st.selectbox("選擇批次庫存", range(len(df_s)), format_func=lambda x: f"【{df_s.iloc[x]['warehouse']}】{df_s.iloc[x]['sku']} | {df_s.iloc[x]['name']} | 餘:{df_s.iloc[x]['qty']}")
-            qty = st.number_input("出貨數量", min_value=0.01, max_value=float(df_s.iloc[sel]['qty']))
-            c1, c2 = st.columns(2); ship = c1.selectbox("貨運方式", SHIPPING_METHODS); track = c2.text_input("物流單號")
-            user = st.selectbox("經手人", KEYERS); note = st.text_input("備註")
-            if st.form_submit_button("執行出貨"):
-                if add_transaction_out(str(date.today()), int(df_s.iloc[sel]['id']), qty, user, note, "銷售出貨", ship, track):
-                    st.success("出貨成功"); st.rerun()
-    else: st.warning("目前無庫存可出貨")
-
-elif page == "🔨 製造作業":
-    st.subheader("🔨 製造領料與完工")
-    colA, colB = st.columns(2)
-    with colA:
-        st.write("### 1. 領用原料")
-        # 領料邏輯與出貨類似，doc_type 改為 "製造領料"
-        st.info("請參考銷售出貨邏輯選擇批次扣除")
-    with colB:
-        st.write("### 2. 完工入庫")
-        # 完工入庫與進貨類似，doc_type 改為 "製造入庫"
-        st.info("請參考進貨作業邏輯建立成品批次")
-
-# ==========================================
-# 5. 分流流水帳報表 (核心更新點)
-# ==========================================
-elif page == "📊 流水帳報表":
-    st.subheader("📊 分流交易流水帳")
-    
-    # 定義查詢函式
-    def get_filtered_history(doc_types):
-        conn = get_connection()
-        types_str = "','".join(doc_types)
-        query = f"""
-            SELECT h.date as '日期', h.doc_no as '單號', h.sku as '貨號', p.name as '品名', 
-                   h.warehouse as '倉庫', h.qty as '數量', h.batch_id as '批號', 
-                   h.supplier as '廠商/來源', h.unit_cost as '單價', h.cost as '總金額',
-                   h.shipping_method as '貨運', h.tracking_no as '物流單號', h.shipping_fee as '運費',
-                   h.user as '經手人', h.note as '備註'
-            FROM history h
-            LEFT JOIN products p ON h.sku = p.sku
-            WHERE h.doc_type IN ('{types_str}')
-            ORDER BY h.id DESC
-        """
-        df = pd.read_sql(query, conn)
-        conn.close()
-        # 非管理員隱藏成本
-        if not is_manager:
-            df = df.drop(columns=['單價', '總金額'], errors='ignore')
-        return df
-
-    tab_in, tab_out, tab_mo = st.tabs(["📥 進貨流水帳", "🚚 出貨流水帳", "🔨 製造流水帳"])
-    
-    with tab_in:
-        st.markdown("#### 顯示：進貨、期初建檔")
-        df_in = get_filtered_history(["進貨", "期初建檔", "庫存調整(加)"])
-        # 隱藏出貨相關欄位
-        df_in = df_in.drop(columns=['貨運', '物流單號', '運費'], errors='ignore')
-        st.dataframe(df_in, use_container_width=True)
+        c1, c2, c3 = st.columns([2,1,1])
+        sel_p = c1.selectbox("選擇商品", prod_opts)
+        wh = c2.selectbox("入庫倉庫", WAREHOUSES)
+        qty = c3.number_input("數量", min_value=0.1)
         
-    with tab_out:
-        st.markdown("#### 顯示：銷售出貨")
-        df_out = get_filtered_history(["銷售出貨", "庫存調整(減)"])
-        # 銷售出貨通常不需要顯示「廠商」欄位
-        df_out = df_out.drop(columns=['廠商/來源'], errors='ignore')
-        st.dataframe(df_out, use_container_width=True)
+        c4, c5 = st.columns(2)
+        supp = c4.text_input("供應商")
+        cost = c5.number_input("進貨單價 (成本)", min_value=0.0) if is_manager else 0.0
         
-    with tab_mo:
-        st.markdown("#### 顯示：製造領料、製造入庫")
-        df_mo = get_filtered_history(["製造領料", "製造入庫"])
-        # 製造單據隱藏物流與廠商資訊
-        df_mo = df_mo.drop(columns=['廠商/來源', '貨運', '物流單號', '運費'], errors='ignore')
-        st.dataframe(df_mo, use_container_width=True)
+        user = st.selectbox("經手人", KEYERS)
+        if st.form_submit_button("執行入庫"):
+            sku = sel_p.split(" | ")[0]
+            batch_id = f"IN-{int(time.time())}"
+            conn = get_connection()
+            conn.execute("INSERT INTO stock (sku, warehouse, batch_id, supplier, unit_cost, qty) VALUES (?,?,?,?,?,?)",
+                         (sku, wh, batch_id, supp, cost, qty))
+            conn.execute("INSERT INTO history (doc_type, doc_no, date, sku, warehouse, qty, user, note, supplier, unit_cost, cost, batch_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                         ("進貨", batch_id, str(date.today()), sku, wh, qty, user, "", supp, cost, qty*cost, batch_id))
+            conn.commit()
+            conn.close()
+            st.success("入庫成功")
 
-    # 匯出全部報表功能
-    if st.button("📥 匯出所有歷史紀錄 (Excel)"):
-        conn = get_connection(); all_h = pd.read_sql("SELECT * FROM history ORDER BY id DESC", conn); conn.close()
-        towrite = io.BytesIO()
-        all_h.to_excel(towrite, index=False, engine='openpyxl')
-        st.download_button("點此下載", towrite.getvalue(), f"all_history_{date.today()}.xlsx")
+# --- 4. 製造與 BOM (核心) ---
+elif page == "🔨 製造與BOM":
+    st.subheader("🔨 生產與配方管理")
+    t1, t2 = st.tabs(["🚀 一鍵生產 (自動扣料)", "📋 BOM 配方設定"])
+
+    with t2:
+        st.markdown("### 📋 產品配方設定")
+        all_prods = pd.read_sql("SELECT sku, name FROM products", get_connection())
+        p_list = [f"{r['sku']} | {r['name']}" for _, r in all_prods.iterrows()]
+        
+        with st.form("bom_form"):
+            c1, c2, c3 = st.columns([2, 2, 1])
+            b_parent = c1.selectbox("選擇成品", p_list, key="bp")
+            b_child = c2.selectbox("選擇原料", p_list, key="bc")
+            b_qty = c3.number_input("單位用量", min_value=0.01)
+            if st.form_submit_button("儲存配方"):
+                p_sku = b_parent.split(" | ")[0]
+                c_sku = b_child.split(" | ")[0]
+                conn = get_connection()
+                conn.execute("INSERT OR REPLACE INTO bom VALUES (?,?,?)", (p_sku, c_sku, b_qty))
+                conn.commit()
+                conn.close()
+                st.rerun()
+
+        # 顯示 BOM 與成本 (主管限定)
+        bom_data = pd.read_sql("""SELECT b.*, p1.name as p_name, p2.name as c_name 
+                                  FROM bom b 
+                                  JOIN products p1 ON b.parent_sku = p1.sku 
+                                  JOIN products p2 ON b.child_sku = p2.sku""", get_connection())
+        for p_sku in bom_data['parent_sku'].unique():
+            p_name = bom_data[bom_data['parent_sku']==p_sku]['p_name'].iloc[0]
+            with st.expander(f"📦 {p_sku} - {p_name}"):
+                items = bom_data[bom_data['parent_sku']==p_sku]
+                total_est = 0.0
+                for _, row in items.iterrows():
+                    c1, c2, c3 = st.columns([3, 1, 2])
+                    c1.text(f"└─ {row['child_sku']} {row['c_name']}")
+                    c2.text(f"x {row['quantity']}")
+                    if is_manager:
+                        avg = get_weighted_average_cost(row['child_sku'])
+                        sub = avg * row['quantity']
+                        total_est += sub
+                        c3.text(f"單價:${avg:,.1f} (小計:${sub:,.1f})")
+                if is_manager:
+                    st.markdown(f"**預估生產單價：:red[${total_est:,.2f}]**")
+
+    with t1:
+        st.markdown("### 🚀 自動化生產")
+        sel_p = st.selectbox("要生產的成品", p_list, key="prod_p")
+        wh = st.selectbox("生產倉庫", WAREHOUSES, key="prod_w")
+        p_qty = st.number_input("生產數量", min_value=1)
+        
+        target_sku = sel_p.split(" | ")[0]
+        shortages = check_bom_shortage(target_sku, p_qty, wh)
+        
+        if shortages:
+            st.error("⚠️ 原料不足，無法生產")
+            st.table(pd.DataFrame(shortages))
+        else:
+            st.success("✅ 原料充足")
+            if st.button("確認執行自動扣料生產"):
+                ok, res = auto_deduct_with_cost_calculation(target_sku, p_qty, wh, "系統")
+                if ok:
+                    st.balloons()
+                    msg = f"生產成功！成品單位成本為: ${res:,.2f}" if is_manager else "生產成功，庫存已更新。"
+                    st.success(msg)
+                    time.sleep(2); st.rerun()
+                else: st.error(f"失敗: {res}")
+
+# --- 5. 報表查詢 ---
+elif page == "📊 報表查詢":
+    st.subheader("📊 庫存動態報表")
+    # 這裡顯示歷史紀錄，根據 is_manager 過濾成本
+    query = """SELECT h.date, h.doc_type, h.sku, p.name, h.warehouse, h.qty, h.unit_cost, h.cost, h.user 
+               FROM history h LEFT JOIN products p ON h.sku = p.sku ORDER BY h.id DESC"""
+    df_h = pd.read_sql(query, get_connection())
+    
+    if not is_manager:
+        df_h = df_h.drop(columns=['unit_cost', 'cost'])
+    
+    st.write("### 異動流水帳")
+    st.dataframe(df_h, use_container_width=True)
