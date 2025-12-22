@@ -162,7 +162,7 @@ def get_distinct_reasons():
     finally:
         conn.close()
 
-# --- ★ 新增核心：處理多倉庫總表匯入 ---
+# --- ★ 修正核心：支援不分大小寫讀取 SKU ---
 def process_full_stock_import(file_obj):
     """
     讀取包含多個倉庫欄位的總表，並自動比對差異進行更新
@@ -171,14 +171,16 @@ def process_full_stock_import(file_obj):
         df = pd.read_csv(file_obj) if file_obj.name.endswith('.csv') else pd.read_excel(file_obj)
         df.columns = [str(c).strip() for c in df.columns]
         
-        # 1. 識別欄位
+        # 1. 識別欄位 (轉為統一標準名稱，不分大小寫)
         rename_map = {}
         for c in df.columns:
-            if c in ['SKU', '編號', '料號']: rename_map[c] = '貨號'
+            c_upper = c.upper()
+            if c_upper in ['SKU', '編號', '料號']: rename_map[c] = '貨號'
+        
         df = df.rename(columns=rename_map)
         
         if '貨號' not in df.columns:
-            return False, "錯誤：Excel 必須包含 `貨號` 欄位"
+            return False, f"錯誤：Excel 必須包含 `貨號` 或 `SKU` 欄位。讀取到的欄位：{list(df.columns)}"
 
         # 2. 找出檔案中存在的倉庫欄位 (交集)
         target_warehouses = [wh for wh in WAREHOUSES if wh in df.columns]
@@ -188,12 +190,11 @@ def process_full_stock_import(file_obj):
 
         update_count = 0
         skip_count = 0
-        details = []
 
         # 3. 逐行、逐倉比對
         for _, row in df.iterrows():
             sku = str(row['貨號']).strip()
-            if not sku: continue
+            if not sku or sku.lower() == 'nan': continue
             
             for wh in target_warehouses:
                 try:
@@ -300,7 +301,7 @@ with st.sidebar:
 # ------------------------------------------------------------------
 if page == "📦 商品管理 (建檔/匯入)":
     st.subheader("📦 商品資料維護")
-    tab1, tab2, tab3 = st.tabs(["✨ 單筆建檔", "📂 匯入商品資料", "📥 匯入期初總庫存"])
+    tab1, tab2, tab3 = st.tabs(["✨ 單筆建檔", "📂 匯入商品資料", "📥 匯入期初完整總表"])
     
     with tab1:
         with st.form("add_prod"):
@@ -325,13 +326,16 @@ if page == "📦 商品管理 (建檔/匯入)":
             try:
                 df = pd.read_csv(up) if up.name.endswith('.csv') else pd.read_excel(up)
                 df.columns = [str(c).strip() for c in df.columns]
+                
+                # ★ 修正商品匯入邏輯 (Case-Insensitive)
                 rename_map = {}
                 for c in df.columns:
-                    if c in ['SKU', '編號', '料號']: rename_map[c] = '貨號'
-                    if c in ['名稱', '商品名稱']: rename_map[c] = '品名'
-                    if c in ['類別', 'Category']: rename_map[c] = '分類'
-                    if c in ['Series']: rename_map[c] = '系列'
-                    if c in ['尺寸', 'Spec']: rename_map[c] = '規格'
+                    c_up = c.upper()
+                    if c_up in ['SKU', '編號', '料號']: rename_map[c] = '貨號'
+                    if c_up in ['名稱', '商品名稱', 'NAME']: rename_map[c] = '品名'
+                    if c_up in ['類別', 'CATEGORY']: rename_map[c] = '分類'
+                    if c_up in ['SERIES']: rename_map[c] = '系列'
+                    if c_up in ['尺寸', 'SPEC']: rename_map[c] = '規格'
                 df = df.rename(columns=rename_map)
                 
                 count = 0
@@ -339,7 +343,9 @@ if page == "📦 商品管理 (建檔/匯入)":
                     for _, row in df.iterrows():
                         s = str(row.get('貨號', '')).strip()
                         n = str(row.get('品名', '')).strip()
-                        if s: # 只要有貨號就嘗試建立，名稱可為空(若已存在)
+                        if s and s.lower() != 'nan':
+                            # 若有貨號但無品名，可以選擇略過或允許空白(更新庫存用)
+                            # 這裡為了安全，若為新商品建議要有品名
                             add_product(s, n, str(row.get('分類', '未分類')), str(row.get('系列', '未分類')), str(row.get('規格', '')))
                             count += 1
                     st.success(f"已掃描並匯入 {count} 筆資料")
@@ -349,7 +355,7 @@ if page == "📦 商品管理 (建檔/匯入)":
 
     with tab3:
         st.markdown("### 📥 匯入期初完整總表")
-        st.info(f"此功能支援一次匯入多個倉庫的數量。請上傳包含 `貨號` 以及倉庫名稱 ({', '.join(WAREHOUSES)}) 的 Excel 檔。")
+        st.info(f"此功能支援一次匯入多個倉庫的數量。請上傳包含 `貨號` (或 `sku`) 以及倉庫名稱 ({', '.join(WAREHOUSES)}) 的 Excel 檔。")
         up_stock = st.file_uploader("上傳完整庫存總表", type=['xlsx', 'csv'], key='stock_up_full_init')
         if up_stock and st.button("開始匯入期初庫存"):
             success, msg = process_full_stock_import(up_stock)
