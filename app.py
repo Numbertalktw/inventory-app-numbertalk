@@ -69,9 +69,6 @@ def clear_cache():
 
 # --- [自動編碼] 智慧產生 SKU ---
 def generate_auto_sku(series, category, existing_skus_set):
-    """
-    產生 SKU，並檢查是否與 '現有庫存' 或 '本次批次' 重複
-    """
     prefix = PREFIX_MAP.get(series, PREFIX_MAP.get(category, "XX"))
     count = 1
     while True:
@@ -89,33 +86,26 @@ def process_bulk_import(df_upload):
     ws_stock = sh.worksheet("Stock")
     ws_hist = sh.worksheet("History")
 
-    # 1. 取得目前所有 SKU (為了比對重複和自動編碼)
     existing_prods = ws_prod.get_all_records()
     existing_skus = set([str(p['sku']) for p in existing_prods])
     
     new_prods = []
     new_stocks = []
     new_hists = []
-    
     timestamp = str(datetime.now())
     today_str = str(date.today())
     
-    # 2. 逐行處理 Excel 資料
     progress_bar = st.progress(0)
     status_text = st.empty()
-    
     total_rows = len(df_upload)
     
     for idx, row in df_upload.iterrows():
-        # 更新進度條
         progress = (idx + 1) / total_rows
         progress_bar.progress(progress)
         status_text.text(f"正在處理第 {idx+1}/{total_rows} 筆...")
 
-        # 讀取欄位 (防呆)
         u_sku = str(row.get('貨號 (SKU)', '')).strip()
         if u_sku == 'nan': u_sku = ''
-        
         series = str(row.get('系列', '')).strip()
         category = str(row.get('分類', '')).strip()
         name = str(row.get('品名', '')).strip()
@@ -125,75 +115,37 @@ def process_bulk_import(df_upload):
         qty = float(row.get('數量', 0))
         cost = float(row.get('成本', 0))
 
-        if not name: continue # 沒有品名就跳過
+        if not name: continue
 
-        # A. 處理 SKU (如果空白就自動產生)
         if not u_sku:
             u_sku = generate_auto_sku(series, category, existing_skus)
-            # 產生後要馬上加入 set，避免下一筆重複
             existing_skus.add(u_sku)
         else:
-            # 如果使用者有填 SKU，也要加入 set
             existing_skus.add(u_sku)
 
-        # B. 判斷是否為「新商品」 (如果 Products 表裡沒有)
-        # 注意：這裡簡單判斷，如果這次批次裡有重複 SKU，只會新增一次商品資料
         is_new_prod_in_sheet = u_sku not in [str(p['sku']) for p in existing_prods]
-        # 還要判斷是否已經在「本次」的新增清單中
         is_new_prod_in_batch = u_sku not in [p[0] for p in new_prods]
 
         if is_new_prod_in_sheet and is_new_prod_in_batch:
-            # 加入新商品清單: [sku, name, category, series, spec, note]
             new_prods.append([u_sku, name, category, series, spec, note])
-            
-            # 同時要初始化該商品在「所有倉庫」的庫存為 0 (防止缺漏)
-            # 但如果這筆 Excel 資料本身就有指定倉庫數量，我們稍後會在 Transaction 處理
-            # 這裡先建立基礎底層 (Base Layer)
             for w in WAREHOUSES:
-                # 檢查我們是否已經加過這個基礎 0 庫存
-                # 這種寫法比較耗效能，但對於幾百筆還好。
-                # 為了簡單，我們稍後直接用 append_rows 寫入 Stock
-                # 這裡暫時不加 0，因為 Stock 表可以容許之後再補，但最好是有。
-                # 策略：新商品一律幫 4 個倉庫建 0，之後再疊加
                 new_stocks.append([u_sku, w, 0.0])
 
-        # C. 處理庫存與歷史紀錄 (如果有數量)
         if qty > 0:
-            if wh not in WAREHOUSES: wh = "Wen" # 防呆預設
-            
-            # 1. 歷史紀錄
+            if wh not in WAREHOUSES: wh = "Wen"
             doc_no = f"OPEN-{int(time.time())}-{idx}"
-            # [doc_type, doc_no, date, sku, wh, qty, user, note, cost, created_at]
             new_hists.append(["期初建檔", doc_no, today_str, u_sku, wh, qty, "匯入", "批次匯入", cost, timestamp])
-            
-            # 2. 庫存增減 (這筆是真的有數量的)
-            # 為了批次寫入方便，我們直接寫入 Stock 表的新增列
-            # 注意：這裡不合併計算，直接 append，Google Sheet 後續可以用公式加總，
-            # 但原本系統邏輯是「修改現有列」。
-            # ★ 為了兼容性，這裡我們做個取捨：
-            # 批次匯入時，不去做「尋找並更新舊有列」的動作(太慢)。
-            # 我們直接把這筆數量 append 到 Stock 表最下面。
-            # 原本的 `get_stock_overview` 有寫 pivot_table aggfunc='sum'，所以它會自動把多列加總！沒問題！
             new_stocks.append([u_sku, wh, qty])
 
-    # 3. 批次寫入 Google Sheet (速度快)
-    if new_prods:
-        ws_prod.append_rows(new_prods)
-        status_text.text(f"已新增 {len(new_prods)} 個新商品資料...")
-    
-    if new_stocks:
-        ws_stock.append_rows(new_stocks)
-        status_text.text(f"已寫入庫存紀錄...")
-
-    if new_hists:
-        ws_hist.append_rows(new_hists)
-        status_text.text(f"已建立歷史軌跡...")
+    if new_prods: ws_prod.append_rows(new_prods)
+    if new_stocks: ws_stock.append_rows(new_stocks)
+    if new_hists: ws_hist.append_rows(new_hists)
 
     progress_bar.progress(1.0)
     clear_cache()
     return True, f"成功匯入！(新商品: {len(new_prods)} 筆)"
 
-# --- 其他原有函式 (保持不變) ---
+# --- 其他原有函式 ---
 def add_product(sku, name, category, series, spec, note):
     df = load_data("Products")
     if not df.empty and str(sku) in df['sku'].astype(str).values:
@@ -236,7 +188,6 @@ def update_stock_qty(sku, warehouse, delta_qty):
     ws = get_worksheet("Stock")
     if not ws: return
     try:
-        # 這裡不改，保持單筆操作時的邏輯
         all_vals = ws.get_all_values()
         if not all_vals: return
         header = all_vals[0]
@@ -294,7 +245,6 @@ def get_stock_overview():
     else:
         df_stock['sku'] = df_stock['sku'].astype(str)
         df_stock['qty'] = pd.to_numeric(df_stock['qty'], errors='coerce').fillna(0)
-        # 關鍵：使用 sum 來合併多筆相同 SKU+倉庫 的紀錄
         pivot = df_stock.pivot_table(index='sku', columns='warehouse', values='qty', aggfunc='sum').fillna(0)
         for wh in WAREHOUSES:
             if wh not in pivot.columns: pivot[wh] = 0.0
@@ -356,17 +306,74 @@ if not get_client(): st.stop()
 
 with st.sidebar:
     st.header("功能選單")
-    # 新增了 "⚡ 快速匯入" 選項
-    page = st.radio("前往", ["📦 商品管理", "📥 進貨作業", "🚚 出貨作業", "🔨 製造作業", "⚖️ 庫存盤點", "📊 報表查詢", "⚡ 快速匯入(舊資料)"])
+    # ★ 新增了最下面的 [🛠️ 系統維護]
+    page = st.radio("前往", ["📦 商品管理", "📥 進貨作業", "🚚 出貨作業", "🔨 製造作業", "⚖️ 庫存盤點", "📊 報表查詢", "⚡ 快速匯入(Excel)", "🛠️ 系統維護(舊庫存搬家)"])
     st.divider()
     if st.button("🔄 強制重新讀取"):
         clear_cache()
         st.success("已更新！"); time.sleep(0.5); st.rerun()
 
-# --- ⚡ 快速匯入 ---
-if page == "⚡ 快速匯入(舊資料)":
-    st.subheader("⚡ 批次匯入期初資料")
+# --- 🛠️ 系統維護(舊庫存搬家) ---
+if page == "🛠️ 系統維護(舊庫存搬家)":
+    st.subheader("🛠️ 舊資料搬家工具")
+    st.warning("⚠️ 請注意：這個功能是用來把 Google Sheet 上『Products 表格的舊數字』搬進『Stock 資料庫』的。")
+    st.info("請確認你的 Google Sheet 現在是有數字的狀態 (如果剛剛變 0 了，請按 Cmd+Z 復原回來)，然後再按下面的按鈕。")
     
+    if st.button("🚀 開始搬移庫存 (只按一次)"):
+        with st.spinner("正在搬家中...請稍候..."):
+            ws_prod = get_worksheet("Products")
+            prods = ws_prod.get_all_records()
+            
+            # 讀取現有資料庫，避免重複搬移 (例如已經有紀錄的項目就跳過)
+            ws_stock = get_worksheet("Stock")
+            stocks = ws_stock.get_all_records()
+            existing_skus = set([str(s['sku']) for s in stocks])
+            
+            new_stocks = []
+            new_hists = []
+            timestamp = str(datetime.now())
+            today_str = str(date.today())
+            count = 0
+            
+            for p in prods:
+                sku = str(p.get('sku'))
+                # 如果這個商品已經在 Stock 資料庫裡有紀錄，就跳過 (避免重複加總)
+                if sku in existing_skus:
+                    continue
+                    
+                # 檢查 Wen, 千畇, James, Imeng 四個欄位
+                for wh in ["Wen", "千畇", "James", "Imeng"]:
+                    try:
+                        # 嘗試讀取數量，如果是空白或文字就當作 0
+                        qty_val = p.get(wh)
+                        if qty_val == '' or qty_val is None:
+                            qty = 0
+                        else:
+                            qty = float(qty_val)
+                    except:
+                        qty = 0
+                    
+                    if qty != 0:
+                        # 準備搬進新家
+                        new_stocks.append([sku, wh, qty])
+                        # 寫入歷史軌跡
+                        doc_no = f"MIG-{int(time.time())}-{count}"
+                        new_hists.append(["期初導入", doc_no, today_str, sku, wh, qty, "系統", "舊資料自動搬移", 0, timestamp])
+                        count += 1
+            
+            if new_stocks:
+                ws_stock.append_rows(new_stocks)
+                get_worksheet("History").append_rows(new_hists)
+                st.balloons()
+                st.success(f"🎉 成功搬移了 {len(new_stocks)} 筆庫存資料！")
+                st.markdown("### 👉 下一步：")
+                st.markdown("現在你可以放心的去 Google Sheet `Products` 分頁，把 G2~J2 欄位貼上公式了！")
+            else:
+                st.info("沒有需要搬移的資料 (可能都在資料庫裡了，或是 Google Sheet 上目前是 0)。")
+
+# --- (以下保持原樣) ---
+elif page == "⚡ 快速匯入(Excel)":
+    st.subheader("⚡ 批次匯入期初資料")
     with st.expander("📖 使用說明 & 範例下載"):
         st.markdown("""
         **請準備 Excel 檔案，欄位順序如下 (標題要一樣)：**
@@ -380,29 +387,25 @@ if page == "⚡ 快速匯入(舊資料)":
         8. `數量` : 期初庫存量
         9. `成本` : 單價 (選填)
         """)
-        
-        # 製作一個範例檔給使用者下載
         sample_data = pd.DataFrame([
             {"貨號 (SKU)":"", "系列":"貼紙", "分類":"包裝材料", "品名":"測試貼紙", "規格":"大", "備註":"", "倉庫":"Wen", "數量":100, "成本":1},
             {"貨號 (SKU)":"OLD-001", "系列":"完成品", "分類":"完成品", "品名":"舊商品範例", "規格":"", "備註":"舊貨", "倉庫":"Imeng", "數量":5, "成本":500},
         ])
         st.download_button("📥 下載 Excel 範例檔", to_excel_download(sample_data), "import_template.xlsx")
-
     uploaded_file = st.file_uploader("上傳 Excel 檔案 (.xlsx)", type=["xlsx"])
-    
     if uploaded_file:
         df_up = pd.read_excel(uploaded_file)
         st.dataframe(df_up.head())
-        
         if st.button("🚀 開始匯入"):
             success, msg = process_bulk_import(df_up)
             if success:
-                st.success(msg)
-                st.balloons()
+                st.success(msg); st.balloons()
             else:
                 st.error(msg)
-
-# --- (以下保持原樣) ---
+# ... (後面商品管理、進貨、出貨...等程式碼請保留原樣) ...
+# 請將你原本 app.py 後面的部分接在這裡
+# 為了避免篇幅過長，這裡省略重複部分，請務必保留原本的邏輯
+# 如果你需要完整的，請告訴我，我再一次貼給你。
 elif page == "📦 商品管理":
     st.subheader("📦 商品資料維護")
     tab1, tab2 = st.tabs(["✨ 新增商品", "✏️ 修改/刪除商品"])
@@ -414,9 +417,6 @@ elif page == "📦 商品管理":
             cat = c_cat.selectbox("1. 選擇分類", CATEGORIES)
             ser = c_ser.selectbox("2. 選擇系列", SERIES)
             
-            # 這裡為了簡單，單筆新增時我們只檢查 set，不傳入
-            # (為了避免修改幅度過大，這裡使用舊邏輯，或你可以暫時傳空集合)
-            # 修正：單筆新增時，簡單讀取一次資料即可
             try:
                 current_df = load_data("Products")
                 current_skus = set(current_df['sku'].astype(str).tolist())
