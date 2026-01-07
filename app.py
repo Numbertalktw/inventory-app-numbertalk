@@ -67,7 +67,7 @@ def clear_cache():
 # 3. 核心邏輯函式
 # ==========================================
 
-# --- [自動編碼] 智慧產生 SKU ---
+# --- [自動編碼] ---
 def generate_auto_sku(series, category, existing_skus_set):
     prefix = PREFIX_MAP.get(series, PREFIX_MAP.get(category, "XX"))
     count = 1
@@ -145,7 +145,7 @@ def process_bulk_import(df_upload):
     clear_cache()
     return True, f"成功匯入！(新商品: {len(new_prods)} 筆)"
 
-# --- 其他原有函式 ---
+# --- 基本增刪改查 ---
 def add_product(sku, name, category, series, spec, note):
     df = load_data("Products")
     if not df.empty and str(sku) in df['sku'].astype(str).values:
@@ -261,30 +261,49 @@ def to_excel_download(df):
         df.to_excel(writer, index=False)
     return output.getvalue()
 
+# ★ 修改這裡：顯示商品名稱
 def render_history_table(doc_type_filter=None):
     st.markdown("#### 🕒 最近紀錄 (可刪除)")
     df = load_data("History")
     if df.empty:
         st.info("尚無紀錄")
         return
+        
+    # 預先讀取商品名稱
+    df_prod = load_data("Products")
+    sku_map = {}
+    if not df_prod.empty:
+        # 建立一個 SKU 對應 Name 的字典
+        sku_map = dict(zip(df_prod['sku'].astype(str), df_prod['name']))
+
     if doc_type_filter:
         if isinstance(doc_type_filter, list):
             df = df[df['doc_type'].isin(doc_type_filter)]
         else:
             df = df[df['doc_type'] == doc_type_filter]
+    
     df = df.sort_index(ascending=False).head(10)
-    cols = st.columns([1.5, 1.5, 2, 1, 1, 1, 2, 1])
-    headers = ["單號", "日期", "品名(SKU)", "倉庫", "數量", "經手", "備註", "操作"]
+
+    # 調整欄寬：品名欄位給大一點 (3)
+    cols = st.columns([1.5, 1.5, 3, 1, 1, 1, 2, 1])
+    headers = ["單號", "日期", "品名 / SKU", "倉庫", "數量", "經手", "備註", "操作"]
     for col, h in zip(cols, headers): col.markdown(f"**{h}**")
+    
     for _, row in df.iterrows():
-        c1, c2, c3, c4, c5, c6, c7, c8 = st.columns([1.5, 1.5, 2, 1, 1, 1, 2, 1])
+        c1, c2, c3, c4, c5, c6, c7, c8 = st.columns([1.5, 1.5, 3, 1, 1, 1, 2, 1])
         c1.text(row.get('doc_no', '')[-10:])
         c2.text(row.get('date', ''))
-        c3.text(f"{row.get('sku','')}")
+        
+        # 顯示品名 + SKU
+        sku = str(row.get('sku',''))
+        prod_name = sku_map.get(sku, "未知品名")
+        c3.text(f"{prod_name}\n({sku})")
+        
         c4.text(row.get('warehouse', ''))
         c5.text(row.get('qty', 0))
         c6.text(row.get('user', ''))
         c7.text(row.get('note', ''))
+        
         if c8.button("🗑️", key=f"del_{row['doc_no']}"):
             with st.spinner("刪除中..."):
                 success, msg = delete_transaction(row['doc_no'])
@@ -306,72 +325,49 @@ if not get_client(): st.stop()
 
 with st.sidebar:
     st.header("功能選單")
-    # ★ 新增了最下面的 [🛠️ 系統維護]
-    page = st.radio("前往", ["📦 商品管理", "📥 進貨作業", "🚚 出貨作業", "🔨 製造作業", "⚖️ 庫存盤點", "📊 報表查詢", "⚡ 快速匯入(Excel)", "🛠️ 系統維護(舊庫存搬家)"])
+    page = st.radio("前往", ["📦 商品管理", "📥 進貨作業", "🚚 出貨作業", "🔨 製造作業", "⚖️ 庫存盤點", "📊 報表查詢", "⚡ 快速匯入(Excel)", "🛠️ 系統維護"])
     st.divider()
     if st.button("🔄 強制重新讀取"):
         clear_cache()
         st.success("已更新！"); time.sleep(0.5); st.rerun()
 
-# --- 🛠️ 系統維護(舊庫存搬家) ---
-if page == "🛠️ 系統維護(舊庫存搬家)":
-    st.subheader("🛠️ 舊資料搬家工具")
-    st.warning("⚠️ 請注意：這個功能是用來把 Google Sheet 上『Products 表格的舊數字』搬進『Stock 資料庫』的。")
-    st.info("請確認你的 Google Sheet 現在是有數字的狀態 (如果剛剛變 0 了，請按 Cmd+Z 復原回來)，然後再按下面的按鈕。")
-    
-    if st.button("🚀 開始搬移庫存 (只按一次)"):
-        with st.spinner("正在搬家中...請稍候..."):
+# --- 🛠️ 系統維護 ---
+if page == "🛠️ 系統維護":
+    st.subheader("🛠️ 系統工具箱")
+    st.info("此功能僅在導入初期使用，用於將 Google Sheet 上 Products 分頁的舊庫存數字，搬移至資料庫中。")
+    if st.button("🚀 執行：舊庫存搬移至資料庫 (Data Migration)"):
+        with st.spinner("正在搬移..."):
             ws_prod = get_worksheet("Products")
             prods = ws_prod.get_all_records()
-            
-            # 讀取現有資料庫，避免重複搬移 (例如已經有紀錄的項目就跳過)
             ws_stock = get_worksheet("Stock")
             stocks = ws_stock.get_all_records()
             existing_skus = set([str(s['sku']) for s in stocks])
-            
             new_stocks = []
             new_hists = []
             timestamp = str(datetime.now())
             today_str = str(date.today())
             count = 0
-            
             for p in prods:
                 sku = str(p.get('sku'))
-                # 如果這個商品已經在 Stock 資料庫裡有紀錄，就跳過 (避免重複加總)
-                if sku in existing_skus:
-                    continue
-                    
-                # 檢查 Wen, 千畇, James, Imeng 四個欄位
+                if sku in existing_skus: continue
                 for wh in ["Wen", "千畇", "James", "Imeng"]:
                     try:
-                        # 嘗試讀取數量，如果是空白或文字就當作 0
-                        qty_val = p.get(wh)
-                        if qty_val == '' or qty_val is None:
-                            qty = 0
-                        else:
-                            qty = float(qty_val)
-                    except:
-                        qty = 0
-                    
+                        qty = float(p.get(wh)) if p.get(wh) else 0
+                    except: qty = 0
                     if qty != 0:
-                        # 準備搬進新家
                         new_stocks.append([sku, wh, qty])
-                        # 寫入歷史軌跡
                         doc_no = f"MIG-{int(time.time())}-{count}"
                         new_hists.append(["期初導入", doc_no, today_str, sku, wh, qty, "系統", "舊資料自動搬移", 0, timestamp])
                         count += 1
-            
             if new_stocks:
                 ws_stock.append_rows(new_stocks)
                 get_worksheet("History").append_rows(new_hists)
                 st.balloons()
-                st.success(f"🎉 成功搬移了 {len(new_stocks)} 筆庫存資料！")
-                st.markdown("### 👉 下一步：")
-                st.markdown("現在你可以放心的去 Google Sheet `Products` 分頁，把 G2~J2 欄位貼上公式了！")
+                st.success(f"🎉 成功搬移了 {len(new_stocks)} 筆資料！")
             else:
-                st.info("沒有需要搬移的資料 (可能都在資料庫裡了，或是 Google Sheet 上目前是 0)。")
+                st.info("沒有需要搬移的資料。")
 
-# --- (以下保持原樣) ---
+# --- ⚡ 快速匯入(Excel) ---
 elif page == "⚡ 快速匯入(Excel)":
     st.subheader("⚡ 批次匯入期初資料")
     with st.expander("📖 使用說明 & 範例下載"):
@@ -402,10 +398,8 @@ elif page == "⚡ 快速匯入(Excel)":
                 st.success(msg); st.balloons()
             else:
                 st.error(msg)
-# ... (後面商品管理、進貨、出貨...等程式碼請保留原樣) ...
-# 請將你原本 app.py 後面的部分接在這裡
-# 為了避免篇幅過長，這裡省略重複部分，請務必保留原本的邏輯
-# 如果你需要完整的，請告訴我，我再一次貼給你。
+
+# --- (功能頁面) ---
 elif page == "📦 商品管理":
     st.subheader("📦 商品資料維護")
     tab1, tab2 = st.tabs(["✨ 新增商品", "✏️ 修改/刪除商品"])
