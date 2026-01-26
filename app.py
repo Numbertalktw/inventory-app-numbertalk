@@ -69,6 +69,7 @@ def clear_cache():
 
 # --- [自動編碼] ---
 def generate_auto_sku(series, category, existing_skus_set):
+    # 如果找不到對應前綴，預設給 XX
     prefix = PREFIX_MAP.get(series, PREFIX_MAP.get(category, "XX"))
     count = 1
     while True:
@@ -261,7 +262,6 @@ def to_excel_download(df):
         df.to_excel(writer, index=False)
     return output.getvalue()
 
-# ★ 修改這裡：顯示商品名稱
 def render_history_table(doc_type_filter=None):
     st.markdown("#### 🕒 最近紀錄 (可刪除)")
     df = load_data("History")
@@ -269,11 +269,9 @@ def render_history_table(doc_type_filter=None):
         st.info("尚無紀錄")
         return
         
-    # 預先讀取商品名稱
     df_prod = load_data("Products")
     sku_map = {}
     if not df_prod.empty:
-        # 建立一個 SKU 對應 Name 的字典
         sku_map = dict(zip(df_prod['sku'].astype(str), df_prod['name']))
 
     if doc_type_filter:
@@ -284,7 +282,6 @@ def render_history_table(doc_type_filter=None):
     
     df = df.sort_index(ascending=False).head(10)
 
-    # 調整欄寬：品名欄位給大一點 (3)
     cols = st.columns([1.5, 1.5, 3, 1, 1, 1, 2, 1])
     headers = ["單號", "日期", "品名 / SKU", "倉庫", "數量", "經手", "備註", "操作"]
     for col, h in zip(cols, headers): col.markdown(f"**{h}**")
@@ -294,7 +291,6 @@ def render_history_table(doc_type_filter=None):
         c1.text(row.get('doc_no', '')[-10:])
         c2.text(row.get('date', ''))
         
-        # 顯示品名 + SKU
         sku = str(row.get('sku',''))
         prod_name = sku_map.get(sku, "未知品名")
         c3.text(f"{prod_name}\n({sku})")
@@ -408,7 +404,19 @@ elif page == "📦 商品管理":
         with st.form("add_prod"):
             st.info("💡 請先選擇 [分類] 與 [系列]，系統會自動帶入建議貨號。")
             c_cat, c_ser = st.columns(2)
-            cat = c_cat.selectbox("1. 選擇分類", CATEGORIES)
+            
+            # ========== 修改：手動新增分類功能 ==========
+            cat_options = CATEGORIES + ["➕ 手動輸入新分類..."]
+            selected_cat_option = c_cat.selectbox("1. 選擇分類", cat_options)
+
+            if selected_cat_option == "➕ 手動輸入新分類...":
+                cat = c_cat.text_input("✍️ 請輸入新分類名稱", placeholder="例如：特殊礦石")
+                if not cat:
+                    st.caption("⚠️ 請輸入分類名稱，否則無法建立商品。")
+            else:
+                cat = selected_cat_option
+            # ==========================================
+
             ser = c_ser.selectbox("2. 選擇系列", SERIES)
             
             try:
@@ -432,14 +440,16 @@ elif page == "📦 商品管理":
             init_qty = c7.number_input("數量", min_value=0)
 
             if st.form_submit_button("新增商品"):
-                if sku and name:
+                if sku and name and cat:
                     success, msg = add_product(sku, name, cat, ser, spec, note)
                     if success:
                         if init_qty > 0:
                             add_transaction("期初建檔", str(date.today()), sku, init_wh, init_qty, "系統", "新商品期初")
-                        st.success(f"成功！已建立 {sku}"); time.sleep(1); st.rerun()
+                        st.success(f"成功！已建立 {sku} (分類: {cat})"); time.sleep(1); st.rerun()
                     else: st.error(msg)
-                else: st.error("缺必填欄位")
+                else:
+                    if not cat: st.error("❌ 請輸入分類名稱")
+                    else: st.error("❌ 缺必填欄位 (貨號、品名、分類)")
 
     with tab2:
         df_prod = load_data("Products")
@@ -451,7 +461,16 @@ elif page == "📦 商品管理":
                 st.info(f"正在編輯: {sel_sku} | {curr_data['name']}")
                 new_name = st.text_input("品名", curr_data['name'])
                 c1, c2, c3 = st.columns(3)
-                new_cat = c1.selectbox("分類", CATEGORIES, index=CATEGORIES.index(curr_data['category']) if curr_data['category'] in CATEGORIES else 0)
+                
+                # 修改頁面如果分類是新的，可能不在 CATEGORIES 清單中，需防呆
+                current_cat_val = curr_data['category']
+                if current_cat_val in CATEGORIES:
+                    cat_index = CATEGORIES.index(current_cat_val)
+                else:
+                    cat_index = 0 # 若找不到，預設第一個，或可選擇直接顯示文字
+                    
+                new_cat = c1.selectbox("分類", CATEGORIES, index=cat_index)
+                
                 new_ser = c2.selectbox("系列", SERIES, index=SERIES.index(curr_data['series']) if curr_data['series'] in SERIES else 0)
                 new_spec = c3.text_input("規格", curr_data['spec'])
                 new_note = st.text_input("備註", curr_data.get('note', ''))
