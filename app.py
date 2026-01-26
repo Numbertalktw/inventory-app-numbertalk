@@ -405,19 +405,28 @@ elif page == "📦 商品管理":
             st.info("💡 請先選擇 [分類] 與 [系列]，系統會自動帶入建議貨號。")
             c_cat, c_ser = st.columns(2)
             
-            # ========== 修改：手動新增分類功能 ==========
+            # ========== 1. 分類 (手動輸入功能) ==========
             cat_options = CATEGORIES + ["➕ 手動輸入新分類..."]
             selected_cat_option = c_cat.selectbox("1. 選擇分類", cat_options)
 
             if selected_cat_option == "➕ 手動輸入新分類...":
                 cat = c_cat.text_input("✍️ 請輸入新分類名稱", placeholder="例如：特殊礦石")
                 if not cat:
-                    st.caption("⚠️ 請輸入分類名稱，否則無法建立商品。")
+                    st.caption("⚠️ 請輸入分類名稱")
             else:
                 cat = selected_cat_option
-            # ==========================================
 
-            ser = c_ser.selectbox("2. 選擇系列", SERIES)
+            # ========== 2. 系列 (手動輸入功能) ==========
+            ser_options = SERIES + ["➕ 手動輸入新系列..."]
+            selected_ser_option = c_ser.selectbox("2. 選擇系列", ser_options)
+            
+            if selected_ser_option == "➕ 手動輸入新系列...":
+                ser = c_ser.text_input("✍️ 請輸入新系列名稱", placeholder="例如：春季限定")
+                if not ser:
+                    st.caption("⚠️ 請輸入系列名稱")
+            else:
+                ser = selected_ser_option
+            # ==========================================
             
             try:
                 current_df = load_data("Products")
@@ -425,6 +434,7 @@ elif page == "📦 商品管理":
             except:
                 current_skus = set()
             
+            # 產生自動編碼
             auto_sku = generate_auto_sku(ser, cat, current_skus)
             
             c1, c2 = st.columns(2)
@@ -440,16 +450,16 @@ elif page == "📦 商品管理":
             init_qty = c7.number_input("數量", min_value=0)
 
             if st.form_submit_button("新增商品"):
-                if sku and name and cat:
+                if sku and name and cat and ser: # 檢查四個必填
                     success, msg = add_product(sku, name, cat, ser, spec, note)
                     if success:
                         if init_qty > 0:
                             add_transaction("期初建檔", str(date.today()), sku, init_wh, init_qty, "系統", "新商品期初")
-                        st.success(f"成功！已建立 {sku} (分類: {cat})"); time.sleep(1); st.rerun()
+                        st.success(f"成功！已建立 {sku} (分類: {cat} / 系列: {ser})"); time.sleep(1); st.rerun()
                     else: st.error(msg)
                 else:
-                    if not cat: st.error("❌ 請輸入分類名稱")
-                    else: st.error("❌ 缺必填欄位 (貨號、品名、分類)")
+                    if not cat or not ser: st.error("❌ 請輸入完整的 [分類] 與 [系列] 名稱")
+                    else: st.error("❌ 缺必填欄位 (貨號、品名、分類、系列)")
 
     with tab2:
         df_prod = load_data("Products")
@@ -462,16 +472,22 @@ elif page == "📦 商品管理":
                 new_name = st.text_input("品名", curr_data['name'])
                 c1, c2, c3 = st.columns(3)
                 
-                # 修改頁面如果分類是新的，可能不在 CATEGORIES 清單中，需防呆
+                # 分類防呆 (若為新分類，選單選第一個，使用者可自己注意)
                 current_cat_val = curr_data['category']
                 if current_cat_val in CATEGORIES:
                     cat_index = CATEGORIES.index(current_cat_val)
                 else:
-                    cat_index = 0 # 若找不到，預設第一個，或可選擇直接顯示文字
-                    
+                    cat_index = 0
                 new_cat = c1.selectbox("分類", CATEGORIES, index=cat_index)
                 
-                new_ser = c2.selectbox("系列", SERIES, index=SERIES.index(curr_data['series']) if curr_data['series'] in SERIES else 0)
+                # 系列防呆
+                current_ser_val = curr_data['series']
+                if current_ser_val in SERIES:
+                    ser_index = SERIES.index(current_ser_val)
+                else:
+                    ser_index = 0
+                new_ser = c2.selectbox("系列", SERIES, index=ser_index)
+                
                 new_spec = c3.text_input("規格", curr_data['spec'])
                 new_note = st.text_input("備註", curr_data.get('note', ''))
                 c_edit, c_del = st.columns([4, 1])
