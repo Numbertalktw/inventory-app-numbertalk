@@ -58,7 +58,14 @@ def load_data(sheet_name):
     ws = get_worksheet(sheet_name)
     if not ws: return pd.DataFrame()
     data = ws.get_all_records()
-    return pd.DataFrame(data)
+    df = pd.DataFrame(data)
+    # 防呆：如果 Products 表沒有 color 欄位，自動補上空欄位
+    if sheet_name == "Products" and not df.empty:
+        if 'color' not in df.columns and '顏色' not in df.columns:
+            df['color'] = ""
+        if 'note' not in df.columns and '備註' not in df.columns:
+            df['note'] = ""
+    return df
 
 def clear_cache():
     load_data.clear()
@@ -69,7 +76,6 @@ def clear_cache():
 
 # --- [自動編碼] ---
 def generate_auto_sku(series, category, existing_skus_set):
-    # 如果找不到對應前綴，預設給 XX
     prefix = PREFIX_MAP.get(series, PREFIX_MAP.get(category, "XX"))
     count = 1
     while True:
@@ -111,6 +117,7 @@ def process_bulk_import(df_upload):
         category = str(row.get('分類', '')).strip()
         name = str(row.get('品名', '')).strip()
         spec = str(row.get('規格', '')).strip()
+        color = str(row.get('顏色', '')).strip()
         note = str(row.get('備註', '')).strip()
         wh = str(row.get('倉庫', '')).strip()
         qty = float(row.get('數量', 0))
@@ -128,7 +135,9 @@ def process_bulk_import(df_upload):
         is_new_prod_in_batch = u_sku not in [p[0] for p in new_prods]
 
         if is_new_prod_in_sheet and is_new_prod_in_batch:
-            new_prods.append([u_sku, name, category, series, spec, note])
+            # ★ 修正：寫入順序調整為 [SKU, Series, Category, Name, Spec, Color, Note]
+            # 對應您的 Sheet: A=sku, B=series, C=category, D=name, E=spec, F=color, G=note
+            new_prods.append([u_sku, series, category, name, spec, color, note])
             for w in WAREHOUSES:
                 new_stocks.append([u_sku, w, 0.0])
 
@@ -147,12 +156,16 @@ def process_bulk_import(df_upload):
     return True, f"成功匯入！(新商品: {len(new_prods)} 筆)"
 
 # --- 基本增刪改查 ---
-def add_product(sku, name, category, series, spec, note):
+def add_product(sku, name, category, series, spec, note, color):
     df = load_data("Products")
     if not df.empty and str(sku) in df['sku'].astype(str).values:
         return False, "貨號已存在"
     ws = get_worksheet("Products")
-    ws.append_row([str(sku), name, category, series, spec, note])
+    
+    # ★ 修正：寫入順序調整為 [SKU, Series, Category, Name, Spec, Color, Note]
+    # 這樣才會對應您截圖中的 Google Sheet 欄位順序
+    ws.append_row([str(sku), series, category, name, spec, color, note])
+    
     ws_stock = get_worksheet("Stock")
     if ws_stock:
         for wh in WAREHOUSES:
@@ -165,11 +178,15 @@ def update_product(sku, new_data):
     try:
         cell = ws.find(str(sku))
         row = cell.row
-        if 'name' in new_data: ws.update_cell(row, 2, new_data['name'])
+        # ★ 修正：更新欄位的索引值也要調整
+        # A=1(sku), B=2(series), C=3(category), D=4(name), E=5(spec), F=6(color), G=7(note)
+        if 'series' in new_data: ws.update_cell(row, 2, new_data['series'])
         if 'category' in new_data: ws.update_cell(row, 3, new_data['category'])
-        if 'series' in new_data: ws.update_cell(row, 4, new_data['series'])
+        if 'name' in new_data: ws.update_cell(row, 4, new_data['name'])
         if 'spec' in new_data: ws.update_cell(row, 5, new_data['spec'])
-        if 'note' in new_data: ws.update_cell(row, 6, new_data['note'])
+        if 'color' in new_data: ws.update_cell(row, 6, new_data['color'])
+        if 'note' in new_data: ws.update_cell(row, 7, new_data['note'])
+        
         clear_cache()
         return True, "更新成功"
     except Exception as e:
@@ -252,7 +269,18 @@ def get_stock_overview():
         pivot['總庫存'] = pivot[WAREHOUSES].sum(axis=1)
         result = pd.merge(df_prod, pivot, on='sku', how='left').fillna(0)
     
-    target_cols = ['sku', 'series', 'category', 'name', 'spec', 'note', '總庫存'] + WAREHOUSES
+    # 確保不會因為 products 表裡有舊的 Wen 欄位而報錯
+    cols_in_result = result.columns.tolist()
+    final_wh_cols = []
+    for w in WAREHOUSES:
+        # 如果因為 merge 產生了 Wen_y (來自 Stock 表)，優先使用
+        if f"{w}_y" in cols_in_result:
+            result.rename(columns={f"{w}_y": w}, inplace=True)
+            final_wh_cols.append(w)
+        elif w in cols_in_result:
+            final_wh_cols.append(w)
+
+    target_cols = ['sku', 'series', 'category', 'name', 'spec', 'color', 'note', '總庫存'] + final_wh_cols
     final_cols = [c for c in target_cols if c in result.columns]
     return result[final_cols]
 
@@ -369,19 +397,20 @@ elif page == "⚡ 快速匯入(Excel)":
     with st.expander("📖 使用說明 & 範例下載"):
         st.markdown("""
         **請準備 Excel 檔案，欄位順序如下 (標題要一樣)：**
-        1. `貨號 (SKU)` : 若留空，系統會自動編碼。若已有舊編號請填入。
-        2. `系列` : 例如：貼紙、生命數字能量項鍊... (用來自動編碼)
+        1. `貨號 (SKU)` : 若留空，系統會自動編碼。
+        2. `系列` : 例如：貼紙、生命數字能量項鍊...
         3. `分類` : 例如：包裝材料、完成品
         4. `品名` : *必填
         5. `規格`
-        6. `備註`
-        7. `倉庫` : 請填 Wen / 千畇 / James / Imeng
-        8. `數量` : 期初庫存量
-        9. `成本` : 單價 (選填)
+        6. `顏色` : (新增欄位)
+        7. `備註`
+        8. `倉庫` : 請填 Wen / 千畇 / James / Imeng
+        9. `數量` : 期初庫存量
+        10. `成本` : 單價 (選填)
         """)
         sample_data = pd.DataFrame([
-            {"貨號 (SKU)":"", "系列":"貼紙", "分類":"包裝材料", "品名":"測試貼紙", "規格":"大", "備註":"", "倉庫":"Wen", "數量":100, "成本":1},
-            {"貨號 (SKU)":"OLD-001", "系列":"完成品", "分類":"完成品", "品名":"舊商品範例", "規格":"", "備註":"舊貨", "倉庫":"Imeng", "數量":5, "成本":500},
+            {"貨號 (SKU)":"", "系列":"貼紙", "分類":"包裝材料", "品名":"測試貼紙", "規格":"大", "顏色":"紅", "備註":"", "倉庫":"Wen", "數量":100, "成本":1},
+            {"貨號 (SKU)":"OLD-001", "系列":"完成品", "分類":"完成品", "品名":"舊商品範例", "規格":"", "顏色":"", "備註":"舊貨", "倉庫":"Imeng", "數量":5, "成本":500},
         ])
         st.download_button("📥 下載 Excel 範例檔", to_excel_download(sample_data), "import_template.xlsx")
     uploaded_file = st.file_uploader("上傳 Excel 檔案 (.xlsx)", type=["xlsx"])
@@ -405,44 +434,59 @@ elif page == "📦 商品管理":
             st.info("💡 請先選擇 [分類] 與 [系列]，系統會自動帶入建議貨號。")
             c_cat, c_ser = st.columns(2)
             
-            # ========== 1. 分類 (手動輸入功能) ==========
+            # ========== 1. 分類 ==========
             cat_options = CATEGORIES + ["➕ 手動輸入新分類..."]
             selected_cat_option = c_cat.selectbox("1. 選擇分類", cat_options)
-
             if selected_cat_option == "➕ 手動輸入新分類...":
                 cat = c_cat.text_input("✍️ 請輸入新分類名稱", placeholder="例如：特殊礦石")
-                if not cat:
-                    st.caption("⚠️ 請輸入分類名稱")
             else:
                 cat = selected_cat_option
 
-            # ========== 2. 系列 (手動輸入功能) ==========
+            # ========== 2. 系列 ==========
             ser_options = SERIES + ["➕ 手動輸入新系列..."]
             selected_ser_option = c_ser.selectbox("2. 選擇系列", ser_options)
-            
             if selected_ser_option == "➕ 手動輸入新系列...":
                 ser = c_ser.text_input("✍️ 請輸入新系列名稱", placeholder="例如：春季限定")
-                if not ser:
-                    st.caption("⚠️ 請輸入系列名稱")
             else:
                 ser = selected_ser_option
-            # ==========================================
             
+            # 準備資料與自動編碼
             try:
                 current_df = load_data("Products")
                 current_skus = set(current_df['sku'].astype(str).tolist())
+                # 取得既有的規格與顏色列表 (去除空白與重複)
+                ex_specs = sorted(list(set([str(x) for x in current_df['spec'].tolist() if str(x).strip()]))) if 'spec' in current_df.columns else []
+                ex_colors = sorted(list(set([str(x) for x in current_df['color'].tolist() if str(x).strip()]))) if 'color' in current_df.columns else []
             except:
                 current_skus = set()
+                ex_specs = []
+                ex_colors = []
             
-            # 產生自動編碼
             auto_sku = generate_auto_sku(ser, cat, current_skus)
             
             c1, c2 = st.columns(2)
             sku = c1.text_input("3. 貨號 (可手動修改)", value=auto_sku)
             name = c2.text_input("4. 品名 *必填")
+            
+            # ========== 3. 規格與顏色 ==========
             c3, c4 = st.columns(2)
-            spec = c3.text_input("規格/尺寸")
-            note = c4.text_input("備註 (Note)")
+            
+            spec_opts = [""] + ex_specs + ["➕ 手動輸入..."]
+            sel_spec = c3.selectbox("5. 規格/尺寸", spec_opts)
+            if sel_spec == "➕ 手動輸入...":
+                spec = c3.text_input("✍️ 輸入新規格", placeholder="例如: 8mm")
+            else:
+                spec = sel_spec
+
+            color_opts = [""] + ex_colors + ["➕ 手動輸入..."]
+            sel_color = c4.selectbox("6. 顏色", color_opts)
+            if sel_color == "➕ 手動輸入...":
+                color = c4.text_input("✍️ 輸入新顏色", placeholder="例如: 玫瑰金")
+            else:
+                color = sel_color
+            
+            note = st.text_input("7. 備註 (Note)")
+            
             st.markdown("---")
             st.caption("👇 期初庫存 (選填)")
             c6, c7 = st.columns(2)
@@ -450,16 +494,16 @@ elif page == "📦 商品管理":
             init_qty = c7.number_input("數量", min_value=0)
 
             if st.form_submit_button("新增商品"):
-                if sku and name and cat and ser: # 檢查四個必填
-                    success, msg = add_product(sku, name, cat, ser, spec, note)
+                if sku and name and cat and ser:
+                    # 注意：這裡的參數順序已配合上面的函式修改
+                    success, msg = add_product(sku, name, cat, ser, spec, note, color)
                     if success:
                         if init_qty > 0:
                             add_transaction("期初建檔", str(date.today()), sku, init_wh, init_qty, "系統", "新商品期初")
-                        st.success(f"成功！已建立 {sku} (分類: {cat} / 系列: {ser})"); time.sleep(1); st.rerun()
+                        st.success(f"成功！已建立 {sku}"); time.sleep(1); st.rerun()
                     else: st.error(msg)
                 else:
-                    if not cat or not ser: st.error("❌ 請輸入完整的 [分類] 與 [系列] 名稱")
-                    else: st.error("❌ 缺必填欄位 (貨號、品名、分類、系列)")
+                    st.error("❌ 缺必填欄位 (貨號、品名、分類、系列)")
 
     with tab2:
         df_prod = load_data("Products")
@@ -470,29 +514,25 @@ elif page == "📦 商品管理":
             with st.form("edit_prod"):
                 st.info(f"正在編輯: {sel_sku} | {curr_data['name']}")
                 new_name = st.text_input("品名", curr_data['name'])
-                c1, c2, c3 = st.columns(3)
+                c1, c2 = st.columns(2)
                 
-                # 分類防呆 (若為新分類，選單選第一個，使用者可自己注意)
-                current_cat_val = curr_data['category']
-                if current_cat_val in CATEGORIES:
-                    cat_index = CATEGORIES.index(current_cat_val)
-                else:
-                    cat_index = 0
-                new_cat = c1.selectbox("分類", CATEGORIES, index=cat_index)
+                curr_cat = curr_data['category']
+                cat_idx = CATEGORIES.index(curr_cat) if curr_cat in CATEGORIES else 0
+                new_cat = c1.selectbox("分類", CATEGORIES, index=cat_idx)
                 
-                # 系列防呆
-                current_ser_val = curr_data['series']
-                if current_ser_val in SERIES:
-                    ser_index = SERIES.index(current_ser_val)
-                else:
-                    ser_index = 0
-                new_ser = c2.selectbox("系列", SERIES, index=ser_index)
+                curr_ser = curr_data['series']
+                ser_idx = SERIES.index(curr_ser) if curr_ser in SERIES else 0
+                new_ser = c2.selectbox("系列", SERIES, index=ser_idx)
                 
+                c3, c4 = st.columns(2)
                 new_spec = c3.text_input("規格", curr_data['spec'])
+                new_color = c4.text_input("顏色", curr_data.get('color', '')) 
+                
                 new_note = st.text_input("備註", curr_data.get('note', ''))
+                
                 c_edit, c_del = st.columns([4, 1])
                 if c_edit.form_submit_button("💾 儲存修改"):
-                    up_data = {'name': new_name, 'category': new_cat, 'series': new_ser, 'spec': new_spec, 'note': new_note}
+                    up_data = {'name': new_name, 'category': new_cat, 'series': new_ser, 'spec': new_spec, 'note': new_note, 'color': new_color}
                     s, m = update_product(sel_sku, up_data)
                     if s: st.success(m); time.sleep(1); st.rerun()
                     else: st.error(m)
@@ -544,56 +584,4 @@ elif page == "🚚 出貨作業":
 
 elif page == "🔨 製造作業":
     st.subheader("🔨 生產管理")
-    prods = load_data("Products")
-    if not prods.empty:
-        prods['label'] = prods['sku'].astype(str) + " | " + prods['name']
-        t1, t2 = st.tabs(["領料 (扣原物料)", "完工 (增成品)"])
-        with t1:
-            with st.form("mo1"):
-                sel = st.selectbox("原料", prods['label'])
-                wh = st.selectbox("倉庫", WAREHOUSES)
-                qty = st.number_input("量", 1)
-                note = st.text_input("備註", "領料")
-                if st.form_submit_button("領料"):
-                    add_transaction("製造領料", str(date.today()), sel.split(" | ")[0], wh, qty, "工廠", note)
-                    st.success("OK"); time.sleep(0.5); st.rerun()
-            render_history_table("製造領料")
-        with t2:
-            with st.form("mo2"):
-                sel = st.selectbox("成品", prods['label'])
-                wh = st.selectbox("倉庫", WAREHOUSES)
-                qty = st.number_input("量", 1)
-                note = st.text_input("備註", "完工")
-                if st.form_submit_button("完工"):
-                    add_transaction("製造入庫", str(date.today()), sel.split(" | ")[0], wh, qty, "工廠", note)
-                    st.success("OK"); time.sleep(0.5); st.rerun()
-            render_history_table("製造入庫")
-
-elif page == "⚖️ 庫存盤點":
-    st.subheader("⚖️ 庫存調整")
-    prods = load_data("Products")
-    if not prods.empty:
-        prods['label'] = prods['sku'].astype(str) + " | " + prods['name']
-        with st.form("adj"):
-            c1, c2 = st.columns(2)
-            sel = c1.selectbox("商品", prods['label'])
-            wh = c2.selectbox("倉庫", WAREHOUSES)
-            c3, c4 = st.columns(2)
-            act = c3.radio("動作", ["增加 (+)", "減少 (-)"], horizontal=True)
-            qty = c4.number_input("量", 1)
-            res = st.selectbox("原因", DEFAULT_REASONS)
-            note = st.text_input("補充備註")
-            full_note = f"{res} - {note}" if note else res
-            if st.form_submit_button("調整"):
-                tp = "庫存調整(加)" if act == "增加 (+)" else "庫存調整(減)"
-                add_transaction(tp, str(date.today()), sel.split(" | ")[0], wh, qty, "管理員", full_note)
-                st.success("OK"); time.sleep(0.5); st.rerun()
-    st.divider()
-    render_history_table(["庫存調整(加)", "庫存調整(減)"])
-
-elif page == "📊 報表查詢":
-    st.subheader("📊 數據報表中心")
-    df = get_stock_overview()
-    st.dataframe(df, use_container_width=True)
-    if not df.empty:
-        st.download_button("📥 下載 Excel", to_excel_download(df), f"Stock_Report_{date.today()}.xlsx")
+    prods
