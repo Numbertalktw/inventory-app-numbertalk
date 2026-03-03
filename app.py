@@ -170,7 +170,6 @@ def update_product(sku, new_data):
     try:
         cell = ws.find(str(sku))
         row = cell.row
-        # A=1(sku), B=2(series), C=3(category), D=4(name), E=5(spec), F=6(color), G=7(note)
         if 'series' in new_data: ws.update_cell(row, 2, new_data['series'])
         if 'category' in new_data: ws.update_cell(row, 3, new_data['category'])
         if 'name' in new_data: ws.update_cell(row, 4, new_data['name'])
@@ -215,6 +214,29 @@ def update_stock_qty(sku, warehouse, delta_qty):
     except Exception as e:
         st.error(f"更新庫存失敗: {e}")
 
+def transfer_stock(sku, from_wh, to_wh, qty, user, note):
+    """新增功能：直接更改倉庫(移庫)"""
+    if from_wh == to_wh:
+        return False, "❌ 來源倉庫與目標倉庫不能相同"
+    
+    timestamp = str(datetime.now())
+    today_str = str(date.today())
+    doc_no = f"TR-{int(time.time())}"
+    
+    ws_hist = get_worksheet("History")
+    # 建立一對移庫紀錄
+    record_out = ["移庫(撥出)", doc_no, today_str, str(sku), from_wh, float(qty), user, f"移至 {to_wh} | {note}", 0, timestamp]
+    record_in = ["移庫(撥入)", doc_no, today_str, str(sku), to_wh, float(qty), user, f"來自 {from_wh} | {note}", 0, timestamp]
+    
+    try:
+        ws_hist.append_rows([record_out, record_in])
+        update_stock_qty(sku, from_wh, -float(qty))
+        update_stock_qty(sku, to_wh, float(qty))
+        clear_cache()
+        return True, f"✅ 移庫完成！單號: {doc_no}"
+    except Exception as e:
+        return False, f"移庫失敗: {e}"
+
 def add_transaction(doc_type, date_str, sku, wh, qty, user, note, cost=0):
     ws_hist = get_worksheet("History")
     doc_prefix = {"進貨":"IN", "銷售出貨":"OUT", "製造領料":"MO", "製造入庫":"PD", "庫存調整(加)":"ADJ+", "庫存調整(減)":"ADJ-", "期初建檔":"OPEN"}.get(doc_type, "DOC")
@@ -228,13 +250,27 @@ def add_transaction(doc_type, date_str, sku, wh, qty, user, note, cost=0):
 def delete_transaction(doc_no):
     ws_hist = get_worksheet("History")
     try:
-        cell = ws_hist.find(doc_no)
-        row_num = cell.row
-        record = ws_hist.row_values(row_num)
-        r_type, r_sku, r_wh, r_qty = record[0], record[3], record[4], float(record[5])
-        reverse_factor = 1 if r_type in ['銷售出貨', '製造領料', '庫存調整(減)'] else -1
-        update_stock_qty(r_sku, r_wh, r_qty * reverse_factor)
-        ws_hist.delete_rows(row_num)
+        # 如果是移庫單，需要處理成對的紀錄
+        cells = ws_hist.findall(doc_no)
+        if not cells:
+            return False, "找不到該單號"
+            
+        for cell in reversed(cells): # 從後往前刪除避免 row index 偏移
+            row_num = cell.row
+            record = ws_hist.row_values(row_num)
+            r_type, r_sku, r_wh, r_qty = record[0], record[3], record[4], float(record[5])
+            
+            # 判斷如何還原庫存
+            if r_type == "移庫(撥出)":
+                update_stock_qty(r_sku, r_wh, r_qty)
+            elif r_type == "移庫(撥入)":
+                update_stock_qty(r_sku, r_wh, -r_qty)
+            else:
+                reverse_factor = 1 if r_type in ['銷售出貨', '製造領料', '庫存調整(減)'] else -1
+                update_stock_qty(r_sku, r_wh, r_qty * reverse_factor)
+            
+            ws_hist.delete_rows(row_num)
+            
         clear_cache()
         return True, "✅ 紀錄已刪除，庫存已自動還原。"
     except Exception as e:
@@ -296,7 +332,7 @@ def render_history_table(doc_type_filter=None):
         else:
             df = df[df['doc_type'] == doc_type_filter]
     
-    df = df.sort_index(ascending=False).head(10)
+    df = df.sort_index(ascending=False).head(15)
 
     cols = st.columns([1.5, 1.5, 3, 1, 1, 1, 2, 1])
     headers = ["單號", "日期", "品名 / SKU", "倉庫", "數量", "經手", "備註", "操作"]
@@ -316,7 +352,7 @@ def render_history_table(doc_type_filter=None):
         c6.text(row.get('user', ''))
         c7.text(row.get('note', ''))
         
-        if c8.button("🗑️", key=f"del_{row['doc_no']}"):
+        if c8.button("🗑️", key=f"del_{row['doc_no']}_{row['warehouse']}"):
             with st.spinner("刪除中..."):
                 success, msg = delete_transaction(row['doc_no'])
                 if success:
@@ -337,14 +373,43 @@ if not get_client(): st.stop()
 
 with st.sidebar:
     st.header("功能選單")
-    page = st.radio("前往", ["📦 商品管理", "📥 進貨作業", "🚚 出貨作業", "🔨 製造作業", "⚖️ 庫存盤點", "📊 報表查詢", "⚡ 快速匯入(Excel)", "🛠️ 系統維護"])
+    page = st.radio("前往", ["📦 商品管理", "📦 移庫作業", "📥 進貨作業", "🚚 出貨作業", "🔨 製造作業", "⚖️ 庫存盤點", "📊 報表查詢", "⚡ 快速匯入(Excel)", "🛠️ 系統維護"])
     st.divider()
     if st.button("🔄 強制重新讀取"):
         clear_cache()
         st.success("已更新！"); time.sleep(0.5); st.rerun()
 
+# --- 📦 移庫作業 ---
+if page == "📦 移庫作業":
+    st.subheader("📦 倉庫間移庫 (直接更改所在倉庫)")
+    st.info("💡 此功能會自動扣除來源倉庫數量並增加目標倉庫數量。")
+    prods = load_data("Products")
+    if not prods.empty:
+        prods['label'] = prods['sku'].astype(str) + " | " + prods['name']
+        with st.form("transfer_form"):
+            c1, c2 = st.columns([2, 1])
+            sel_prod = c1.selectbox("選擇商品", prods['label'])
+            user = c2.selectbox("經手人", KEYERS)
+            
+            col_wh1, col_wh2, col_qty = st.columns(3)
+            from_wh = col_wh1.selectbox("1. 來源倉庫 (撥出)", WAREHOUSES, index=0)
+            to_wh = col_wh2.selectbox("2. 目標倉庫 (撥入)", WAREHOUSES, index=1)
+            qty = col_qty.number_input("3. 數量", min_value=0.1, step=1.0)
+            
+            note = st.text_input("備註 (例如: 調貨)")
+            
+            if st.form_submit_button("🚀 執行移庫"):
+                sku_only = sel_prod.split(" | ")[0]
+                success, msg = transfer_stock(sku_only, from_wh, to_wh, qty, user, note)
+                if success:
+                    st.success(msg); time.sleep(1); st.rerun()
+                else:
+                    st.error(msg)
+    st.divider()
+    render_history_table(["移庫(撥出)", "移庫(撥入)"])
+
 # --- 🛠️ 系統維護 ---
-if page == "🛠️ 系統維護":
+elif page == "🛠️ 系統維護":
     st.subheader("🛠️ 系統工具箱")
     st.info("此功能僅在導入初期使用，用於將 Google Sheet 上 Products 分頁的舊庫存數字，搬移至資料庫中。")
     if st.button("🚀 執行：舊庫存搬移至資料庫 (Data Migration)"):
@@ -412,17 +477,15 @@ elif page == "⚡ 快速匯入(Excel)":
             else:
                 st.error(msg)
 
-# --- (功能頁面) ---
+# --- 📦 商品管理 ---
 elif page == "📦 商品管理":
     st.subheader("📦 商品資料維護")
     tab1, tab2 = st.tabs(["✨ 新增商品", "✏️ 修改/刪除商品"])
     
     with tab1:
-        # ★★★ 修正點：移除 with st.form，改為直接佈局，這樣下拉選單改變時才能即時反應！
         st.info("💡 請先選擇 [分類] 與 [系列]，系統會自動帶入建議貨號。")
         c_cat, c_ser = st.columns(2)
         
-        # ========== 1. 分類 ==========
         cat_options = CATEGORIES + ["➕ 手動輸入新分類..."]
         selected_cat_option = c_cat.selectbox("1. 選擇分類", cat_options, key="add_cat_sel")
         if selected_cat_option == "➕ 手動輸入新分類...":
@@ -430,7 +493,6 @@ elif page == "📦 商品管理":
         else:
             cat = selected_cat_option
 
-        # ========== 2. 系列 ==========
         ser_options = SERIES + ["➕ 手動輸入新系列..."]
         selected_ser_option = c_ser.selectbox("2. 選擇系列", ser_options, key="add_ser_sel")
         if selected_ser_option == "➕ 手動輸入新系列...":
@@ -438,13 +500,11 @@ elif page == "📦 商品管理":
         else:
             ser = selected_ser_option
         
-        # 準備資料與自動編碼
         try:
             current_df = load_data("Products")
             current_skus = set(current_df['sku'].astype(str).tolist())
             ex_specs = sorted(list(set([str(x) for x in current_df['spec'].tolist() if str(x).strip()]))) if 'spec' in current_df.columns else []
             ex_colors = sorted(list(set([str(x) for x in current_df['color'].tolist() if str(x).strip()]))) if 'color' in current_df.columns else []
-            # 過濾掉可能已被存入資料庫的 "➕ 手動輸入..." 字串，避免選單重複
             ex_specs = [x for x in ex_specs if "手動輸入" not in x]
             ex_colors = [x for x in ex_colors if "手動輸入" not in x]
         except:
@@ -458,9 +518,7 @@ elif page == "📦 商品管理":
         sku = c1.text_input("3. 貨號 (可手動修改)", value=auto_sku, key="add_sku")
         name = c2.text_input("4. 品名 *必填", key="add_name")
         
-        # ========== 3. 規格與顏色 ==========
         c3, c4 = st.columns(2)
-        
         spec_opts = [""] + ex_specs + ["➕ 手動輸入..."]
         sel_spec = c3.selectbox("5. 規格/尺寸", spec_opts, key="add_spec_sel")
         if sel_spec == "➕ 手動輸入...":
@@ -483,7 +541,6 @@ elif page == "📦 商品管理":
         init_wh = c6.selectbox("預設倉庫", WAREHOUSES, key="add_wh")
         init_qty = c7.number_input("數量", min_value=0, key="add_qty")
 
-        # 使用一般的 button，因為不再包在 form 裡，點擊後會直接執行
         if st.button("✨ 確認新增商品", type="primary"):
             if sku and name and cat and ser:
                 success, msg = add_product(sku, name, cat, ser, spec, note, color)
@@ -534,6 +591,7 @@ elif page == "📦 商品管理":
     st.divider()
     st.dataframe(load_data("Products"), use_container_width=True)
 
+# --- 📥 進貨作業 ---
 elif page == "📥 進貨作業":
     st.subheader("📥 進貨入庫")
     prods = load_data("Products")
@@ -553,6 +611,7 @@ elif page == "📥 進貨作業":
                     st.success("成功"); time.sleep(0.5); st.rerun()
     render_history_table("進貨")
 
+# --- 🚚 出貨作業 ---
 elif page == "🚚 出貨作業":
     st.subheader("🚚 銷售出貨")
     prods = load_data("Products")
@@ -572,6 +631,7 @@ elif page == "🚚 出貨作業":
                     st.success("成功"); time.sleep(0.5); st.rerun()
     render_history_table("銷售出貨")
 
+# --- 🔨 製造作業 ---
 elif page == "🔨 製造作業":
     st.subheader("🔨 生產管理")
     prods = load_data("Products")
@@ -599,6 +659,7 @@ elif page == "🔨 製造作業":
                     st.success("OK"); time.sleep(0.5); st.rerun()
             render_history_table("製造入庫")
 
+# --- ⚖️ 庫存盤點 ---
 elif page == "⚖️ 庫存盤點":
     st.subheader("⚖️ 庫存調整")
     prods = load_data("Products")
@@ -621,6 +682,7 @@ elif page == "⚖️ 庫存盤點":
     st.divider()
     render_history_table(["庫存調整(加)", "庫存調整(減)"])
 
+# --- 📊 報表查詢 ---
 elif page == "📊 報表查詢":
     st.subheader("📊 數據報表中心")
     df = get_stock_overview()
