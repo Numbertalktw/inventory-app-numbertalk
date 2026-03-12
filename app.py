@@ -69,7 +69,9 @@ def clear_cache():
 def get_formatted_product_df():
     df = load_data("Products")
     if df.empty: return df
-    df['label'] = df['sku'].astype(str) + " | " + df['name'].astype(str) + " (" + df['spec'].astype(str) + " / " + df['color'].astype(str) + ")"
+    df['spec'] = df['spec'].fillna('').astype(str)
+    df['color'] = df['color'].fillna('').astype(str)
+    df['label'] = df['sku'].astype(str) + " | " + df['name'].astype(str) + " (" + df['spec'] + " / " + df['color'] + ")"
     return df
 
 def generate_auto_sku(series, category, existing_skus_set):
@@ -160,9 +162,9 @@ def delete_transaction(doc_no):
 def transfer_stock(sku, from_wh, to_wh, qty, user, note):
     if from_wh == to_wh: return False, "❌ 來源與目標倉庫不能相同"
     today = str(date.today())
-    success1 = add_transaction("移庫(撥出)", today, sku, from_wh, qty, user, f"移至 {to_wh} | {note}")
-    success2 = add_transaction("移庫(撥入)", today, sku, to_wh, qty, user, f"來自 {from_wh} | {note}")
-    return (success1 and success2), "移庫完成"
+    add_transaction("移庫(撥出)", today, sku, from_wh, qty, user, f"移至 {to_wh} | {note}")
+    add_transaction("移庫(撥入)", today, sku, to_wh, qty, user, f"來自 {from_wh} | {note}")
+    return True, "移庫完成"
 
 def get_stock_overview():
     df_prod = load_data("Products")
@@ -244,9 +246,8 @@ if page == "📦 商品管理":
         c1, c2 = st.columns(2)
         sku = c1.text_input("3. 貨號", value=auto_sku)
         name = c2.text_input("4. 品名 *必填")
-        spec, color = st.columns(2)
-        v_spec = spec.text_input("5. 規格 (形狀/尺寸)")
-        v_color = color.text_input("6. 顏色")
+        v_spec = st.text_input("5. 規格 (形狀/尺寸)")
+        v_color = st.text_input("6. 顏色")
         note = st.text_input("7. 備註")
         if st.button("✨ 確認新增商品"):
             if sku and name:
@@ -256,9 +257,9 @@ if page == "📦 商品管理":
     with t2:
         df_p = load_data("Products")
         if not df_p.empty:
-            sel_sku = st.selectbox("🔍 選擇商品", df_p['sku'].astype(str))
+            sel_sku = st.selectbox("🔍 選擇修改商品", df_p['sku'].astype(str))
             curr = df_p[df_p['sku'].astype(str) == sel_sku].iloc[0]
-            with st.form("edit"):
+            with st.form("edit_prod"):
                 n_name = st.text_input("品名", curr['name'])
                 n_spec = st.text_input("規格", curr['spec'])
                 n_color = st.text_input("顏色", curr['color'])
@@ -302,9 +303,9 @@ elif page == "📥 進貨作業":
                     st.success("成功"); time.sleep(1); st.rerun()
     render_history_table("進貨")
 
-# --- 🚚 出貨作業 (清單模式) ---
+# --- 🚚 出貨作業 (暫存清單模式) ---
 elif page == "🚚 出貨作業":
-    st.subheader("🚚 銷售出貨 (多品項清單模式)")
+    st.subheader("🚚 銷售出貨 (多品項清單)")
     if 'out_list' not in st.session_state: st.session_state['out_list'] = []
     
     order_note = st.text_input("客戶備註 / 訂單號碼", placeholder="例如: #3918 魏 愛玲")
@@ -340,19 +341,21 @@ elif page == "🔨 製造作業":
     t1, t2, t3 = st.tabs(["領料", "完工", "🔧 產品拆解"])
     with t1:
         with st.form("m1"):
-            sel = st.selectbox("原料", prods['label'], key="m_in")
+            sel = st.selectbox("選擇原料", prods['label'], key="m_in")
             wh = st.selectbox("倉庫", WAREHOUSES, key="w_in")
-            qty = st.number_input("量", 1.0)
+            qty = st.number_input("數量", 1.0)
+            note = st.text_input("領料備註", key="mn_in")
             if st.form_submit_button("領料"):
-                add_transaction("製造領料", str(date.today()), sel.split(" | ")[0], wh, qty, "工廠", "")
+                add_transaction("製造領料", str(date.today()), sel.split(" | ")[0], wh, qty, "工廠", note)
                 st.success("OK"); time.sleep(1); st.rerun()
     with t2:
         with st.form("m2"):
-            sel = st.selectbox("成品", prods['label'], key="m_out")
+            sel = st.selectbox("選擇成品", prods['label'], key="m_out")
             wh = st.selectbox("倉庫", WAREHOUSES, key="w_out")
-            qty = st.number_input("量", 1.0)
+            qty = st.number_input("數量", 1.0)
+            note = st.text_input("完工備註", key="mn_out")
             if st.form_submit_button("完工"):
-                add_transaction("製造入庫", str(date.today()), sel.split(" | ")[0], wh, qty, "工廠", "")
+                add_transaction("製造入庫", str(date.today()), sel.split(" | ")[0], wh, qty, "工廠", note)
                 st.success("OK"); time.sleep(1); st.rerun()
     with t3:
         st.info("💡 拆解動作：先扣除成品，再加回原料。")
