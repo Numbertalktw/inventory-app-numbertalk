@@ -7,7 +7,7 @@ import time
 import io
 
 # ==========================================
-# 1. 系統基礎設定 (初始選單)
+# 1. 系統基礎設定
 # ==========================================
 PAGE_TITLE = "numbertalk 雲端庫存系統"
 SPREADSHEET_NAME = "numbertalk-system" 
@@ -231,23 +231,37 @@ with st.sidebar:
     page = st.radio("前往", ["📦 商品管理", "📦 移庫作業", "📥 進貨作業", "🚚 出貨作業", "🔨 製造作業", "📊 報表查詢"])
     if st.button("🔄 強制重新讀取"): clear_cache(); st.rerun()
 
-# --- 📦 商品管理 ---
+# --- 📦 商品管理 (聯動式選單) ---
 if page == "📦 商品管理":
     st.subheader("📦 商品資料維護")
     t1, t2 = st.tabs(["✨ 新增商品", "✏️ 修改/刪除商品"])
     with t1:
         current_df = load_data("Products")
-        # 動態記憶選單邏輯
+        
+        # 動態獲取現有分類
         existing_cats = sorted(list(set(current_df['category'].tolist()))) if not current_df.empty else []
         cat_list = sorted(list(set(CATEGORIES + existing_cats)))
-        existing_sers = sorted(list(set(current_df['series'].tolist()))) if not current_df.empty else []
-        ser_list = sorted(list(set(SERIES + existing_sers)))
 
         c_cat, c_ser = st.columns(2)
+        
+        # 1. 選擇分類
         cat_opt = c_cat.selectbox("1. 分類", cat_list + ["➕ 手動輸入新分類..."])
         final_cat = c_cat.text_input("✍️ 新分類名稱") if cat_opt == "➕ 手動輸入新分類..." else cat_opt
         
-        ser_opt = c_ser.selectbox("2. 系列", ser_list + ["➕ 手動輸入新系列..."])
+        # 🔄 ✨ 聯動選單邏輯 ✨ 🔄
+        # 如果不是手動輸入，則根據所選分類篩選系列
+        if cat_opt != "➕ 手動輸入新分類..." and not current_df.empty:
+            # 找出試算表中對應當前分類的所有系列
+            filtered_sers = current_df[current_df['category'] == cat_opt]['series'].unique().tolist()
+            # 合併基礎清單 (過濾出原本可能屬於該分類的項目)
+            final_ser_list = sorted(list(set(filtered_sers)))
+            if not final_ser_list: # 如果該分類完全沒有紀錄，顯示預設清單
+                final_ser_list = sorted(SERIES)
+        else:
+            final_ser_list = sorted(SERIES)
+
+        # 2. 選擇系列 (會根據分類過濾)
+        ser_opt = c_ser.selectbox("2. 系列 (已根據分類篩選)", final_ser_list + ["➕ 手動輸入新系列..."])
         final_ser = c_ser.text_input("✍️ 新系列名稱") if ser_opt == "➕ 手動輸入新系列..." else ser_opt
         
         auto_sku = generate_auto_sku(final_ser, final_cat, set(current_df['sku'].astype(str)) if not current_df.empty else set())
@@ -265,12 +279,13 @@ if page == "📦 商品管理":
                     st.success(f"✅ 商品已成功建立！"); clear_cache(); time.sleep(1); st.rerun()
                 else: st.error(m)
             else: st.error("❌ 請填寫必填欄位。")
+            
     with t2:
         df_p = load_data("Products")
         if not df_p.empty:
             sel_sku = st.selectbox("🔍 選擇修改商品", df_p['sku'].astype(str))
             curr = df_p[df_p['sku'].astype(str) == sel_sku].iloc[0]
-            with st.form("edit"):
+            with st.form("edit_prod"):
                 n_name = st.text_input("品名", curr['name'])
                 n_spec = st.text_input("規格", curr['spec'])
                 n_color = st.text_input("顏色", curr['color'])
@@ -279,7 +294,7 @@ if page == "📦 商品管理":
                     s, m = update_product(sel_sku, {'name': n_name, 'spec': n_spec, 'color': n_color, 'note': n_note})
                     if s: st.success(m); time.sleep(1); st.rerun()
 
-# --- 📦 移庫作業 ---
+# --- 其餘頁面保持原本邏輯 ---
 elif page == "📦 移庫作業":
     st.subheader("📦 倉庫間移庫")
     prods = get_formatted_product_df()
@@ -296,7 +311,6 @@ elif page == "📦 移庫作業":
                 if s: st.success(m); time.sleep(1); st.rerun()
     render_history_table(["移庫(撥出)", "移庫(撥入)"])
 
-# --- 📥 進貨作業 ---
 elif page == "📥 進貨作業":
     st.subheader("📥 進貨入庫")
     prods = get_formatted_product_df()
@@ -314,7 +328,6 @@ elif page == "📥 進貨作業":
                     st.success("成功"); time.sleep(1); st.rerun()
     render_history_table("進貨")
 
-# --- 🚚 出貨作業 (清單模式) ---
 elif page == "🚚 出貨作業":
     st.subheader("🚚 銷售出貨 (多品項清單)")
     if 'out_list' not in st.session_state: st.session_state['out_list'] = []
@@ -342,7 +355,6 @@ elif page == "🚚 出貨作業":
             st.session_state['out_list'] = []; st.success("批次出貨成功"); time.sleep(1); st.rerun()
     render_history_table("銷售出貨")
 
-# --- 🔨 製造作業 ---
 elif page == "🔨 製造作業":
     st.subheader("🔨 生產與拆解管理")
     if 'm_in_list' not in st.session_state: st.session_state['m_in_list'] = []
@@ -393,13 +405,11 @@ elif page == "🔨 製造作業":
                 q = st.number_input("回庫量", 1.0)
                 if st.form_submit_button("2. 回庫原料"):
                     add_transaction("製造領料", str(date.today()), m.split(" | ")[0], "Wen", -q, "管理員", "拆解回庫")
-                    st.success("已加回"); time.sleep(1); st.rerun()
+                    st.success("原料已回庫"); time.sleep(1); st.rerun()
     render_history_table(["製造領料", "製造入庫"])
 
-# --- 📊 報表查詢 ---
 elif page == "📊 報表查詢":
     st.subheader("📊 庫存報表")
     df = get_stock_overview()
     if not df.empty:
         st.dataframe(df, use_container_width=True)
-        st.download_button("📥 下載 CSV", df.to_csv(index=False).encode('utf-8-sig'), f"Stock_{date.today()}.csv", "text/csv")
