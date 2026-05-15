@@ -58,19 +58,24 @@ def load_data(sheet_name):
         return df.fillna("")
     except: return pd.DataFrame()
 
-def clear_cache(): load_data.clear()
+def clear_cache():
+    load_data.clear()
+    load_product_prices.clear()
 
 # ==========================================
 # 3. 核心功能函式
 # ==========================================
 
 def ensure_price_column():
+    if st.session_state.get('_price_col_ok'):
+        return
     ws = get_worksheet("Products")
     if not ws:
         return
     try:
         header = ws.row_values(1)
         if 'price' in header:
+            st.session_state['_price_col_ok'] = True
             return
         expected = ['sku', 'series', 'category', 'name', 'spec', 'color', 'note']
         if header[:7] == expected:
@@ -80,9 +85,11 @@ def ensure_price_column():
                 ws.update_cell(1, len(header) + 1, 'price')
         else:
             ws.update_cell(1, len(header) + 1, 'price')
+        st.session_state['_price_col_ok'] = True
     except:
         pass
 
+@st.cache_data(ttl=10)
 def load_product_prices():
     ws = get_worksheet("Products")
     if not ws:
@@ -106,11 +113,13 @@ def load_product_prices():
         return {}
 
 def get_formatted_product_df():
-    ensure_price_column()
     df = load_data("Products")
     if df.empty: return df
-    price_map = load_product_prices()
-    df['price'] = df['sku'].astype(str).map(price_map).fillna(0.0)
+    try:
+        price_map = load_product_prices()
+        df['price'] = df['sku'].astype(str).map(price_map).fillna(0.0)
+    except:
+        df['price'] = 0.0
     df['sku'] = df['sku'].astype(str)
     df['name'] = df['name'].astype(str)
     df['label'] = df['sku'] + " | " + df['name'] + " (" + df['spec'].astype(str) + " / " + df['color'].astype(str) + ")"
@@ -243,6 +252,8 @@ def get_stock_overview():
 # ==========================================
 
 def ensure_order_sheets():
+    if st.session_state.get('_order_sheets_ok'):
+        return
     client = get_client()
     if not client:
         return
@@ -259,6 +270,7 @@ def ensure_order_sheets():
             ws = sh.add_worksheet(title="OrderItems", rows=5000, cols=8)
             ws.append_row(["order_no", "sku", "product_name", "qty", "unit_price",
                            "subtotal", "warehouse"])
+        st.session_state['_order_sheets_ok'] = True
     except Exception:
         pass
 
@@ -380,6 +392,8 @@ def delete_order(order_no):
 # ==========================================
 
 def ensure_members_sheet():
+    if st.session_state.get('_members_sheet_ok'):
+        return
     client = get_client()
     if not client:
         return
@@ -390,6 +404,7 @@ def ensure_members_sheet():
             ws = sh.add_worksheet(title="Members", rows=2000, cols=8)
             ws.append_row(["member_id", "name", "phone", "email", "address",
                            "note", "created_at", "last_order_date"])
+        st.session_state['_members_sheet_ok'] = True
     except Exception:
         pass
 
