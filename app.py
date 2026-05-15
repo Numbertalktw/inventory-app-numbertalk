@@ -51,13 +51,8 @@ def load_data(sheet_name):
     ws = get_worksheet(sheet_name)
     if ws is None: return pd.DataFrame()
     try:
-        all_vals = ws.get_all_values()
-        if not all_vals or len(all_vals) < 2: return pd.DataFrame()
-        header = all_vals[0]
-        rows = all_vals[1:]
-        n = len(header)
-        padded = [(row + [''] * n)[:n] for row in rows]
-        df = pd.DataFrame(padded, columns=header)
+        data = ws.get_all_records()
+        df = pd.DataFrame(data)
         for col in ['sku', 'name', 'category', 'series', 'spec', 'color', 'note', 'price']:
             if col not in df.columns: df[col] = ""
         return df.fillna("")
@@ -88,10 +83,34 @@ def ensure_price_column():
     except:
         pass
 
+def load_product_prices():
+    ws = get_worksheet("Products")
+    if not ws:
+        return {}
+    try:
+        header = ws.row_values(1)
+        if 'price' not in header:
+            return {}
+        price_col = header.index('price') + 1
+        skus = ws.col_values(1)[1:]
+        prices = ws.col_values(price_col)[1:]
+        result = {}
+        for i in range(len(skus)):
+            p = prices[i] if i < len(prices) else ''
+            try:
+                result[str(skus[i])] = float(p) if p not in ['', None] else 0.0
+            except (ValueError, TypeError):
+                result[str(skus[i])] = 0.0
+        return result
+    except:
+        return {}
+
 def get_formatted_product_df():
     ensure_price_column()
     df = load_data("Products")
     if df.empty: return df
+    price_map = load_product_prices()
+    df['price'] = df['sku'].astype(str).map(price_map).fillna(0.0)
     df['sku'] = df['sku'].astype(str)
     df['name'] = df['name'].astype(str)
     df['label'] = df['sku'] + " | " + df['name'] + " (" + df['spec'].astype(str) + " / " + df['color'].astype(str) + ")"
