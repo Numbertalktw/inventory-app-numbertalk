@@ -345,7 +345,7 @@ st.title(f"💎 {PAGE_TITLE}")
 
 with st.sidebar:
     st.header("功能選單")
-    page = st.radio("前往", ["📦 商品管理", "📦 移庫作業", "📥 進貨作業", "🚚 出貨作業", "🛒 訂單管理", "🔨 製造作業", "📊 報表查詢"])
+    page = st.radio("前往", ["🛒 訂單管理", "🔨 製造作業", "🚚 出貨作業", "📦 商品管理", "📥 進貨作業", "📦 移庫作業", "📊 報表查詢"])
     if st.button("🔄 強制刷新資料"):
         clear_cache()
         st.rerun()
