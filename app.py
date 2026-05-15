@@ -15,6 +15,7 @@ WAREHOUSES = ["Wen", "千畇", "James", "Imeng"]
 CATEGORIES = ["天然石", "金屬配件", "線材", "包裝材料", "完成品", "數字珠", "數字串", "香料", "手作設備"]
 SERIES = ["原料", "半成品", "成品", "包材", "生命數字能量項鍊", "數字手鍊", "貼紙", "小卡", "火漆章", "能量蠟燭", "香包", "水晶", "魔法鹽"]
 KEYERS = ["Wen", "千畇", "James", "Imeng", "小幫手"]
+SHIPPING_METHODS = ["郵局", "i郵箱", "全家", "7-11", "自取"]
 
 ORDER_STATUSES = ["待處理", "處理中", "已出貨", "已完成", "已取消"]
 ORDER_STATUS_COLORS = {
@@ -37,19 +38,13 @@ def get_client():
     try:
         creds_dict = st.secrets["gcp_service_account"]
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
-        client = gspread.authorize(creds)
-        return client
-    except Exception as e:
-        st.error(f"❌ 連線失敗: {e}")
-        return None
+        return gspread.authorize(creds)
+    except: return None
 
 def get_worksheet(sheet_name):
     client = get_client()
-    if not client: return None
-    try:
-        sh = client.open(SPREADSHEET_NAME)
-        return sh.worksheet(sheet_name)
-    except Exception: return None
+    try: return client.open(SPREADSHEET_NAME).worksheet(sheet_name)
+    except: return None
 
 @st.cache_data(ttl=5) 
 def load_data(sheet_name):
@@ -58,16 +53,16 @@ def load_data(sheet_name):
     try:
         data = ws.get_all_records()
         df = pd.DataFrame(data)
+        # 確保基礎欄位存在
         for col in ['sku', 'name', 'category', 'series', 'spec', 'color', 'note']:
             if col not in df.columns: df[col] = ""
         return df.fillna("")
-    except Exception: return pd.DataFrame()
+    except: return pd.DataFrame()
 
-def clear_cache():
-    load_data.clear()
+def clear_cache(): load_data.clear()
 
 # ==========================================
-# 3. 核心功能
+# 3. 核心功能函式
 # ==========================================
 
 def get_formatted_product_df():
@@ -75,9 +70,7 @@ def get_formatted_product_df():
     if df.empty: return df
     df['sku'] = df['sku'].astype(str)
     df['name'] = df['name'].astype(str)
-    df['spec'] = df['spec'].fillna('').astype(str)
-    df['color'] = df['color'].fillna('').astype(str)
-    df['label'] = df['sku'] + " | " + df['name'] + " (" + df['spec'] + " / " + df['color'] + ")"
+    df['label'] = df['sku'] + " | " + df['name'] + " (" + df['spec'].astype(str) + " / " + df['color'].astype(str) + ")"
     return df
 
 def update_stock_qty(sku, warehouse, delta_qty):
@@ -88,28 +81,39 @@ def update_stock_qty(sku, warehouse, delta_qty):
         header = all_vals[0]
         sku_idx, wh_idx, qty_idx = header.index("sku"), header.index("warehouse"), header.index("qty")
         row_idx = -1
-        current_val = 0.0
         for i, row in enumerate(all_vals[1:], 2):
             if str(row[sku_idx]) == str(sku) and str(row[wh_idx]) == str(warehouse):
-                row_idx, current_val = i, float(row[qty_idx]) if row[qty_idx] else 0.0
+                row_idx = i
+                current_val = float(row[qty_idx]) if row[qty_idx] else 0.0
                 break
         if row_idx > 0:
             ws.update_cell(row_idx, qty_idx + 1, current_val + delta_qty)
         else:
             ws.append_row([str(sku), warehouse, delta_qty])
-    except Exception: pass
+    except: pass
 
-def add_transaction(doc_type, date_str, sku, wh, qty, user, note, cost=0):
+def add_transaction(doc_type, date_str, sku, wh, qty, user, note, ship_method="", ship_no=""):
     ws_hist = get_worksheet("History")
+    # 自動抓取品名填入 K 欄
+    df_p = load_data("Products")
+    p_name = ""
+    if not df_p.empty:
+        match = df_p[df_p['sku'].astype(str) == str(sku)]
+        if not match.empty: p_name = match.iloc[0]['name']
+
     prefix = {"進貨":"IN", "銷售出貨":"OUT", "製造領料":"MO", "製造入庫":"PD", "移庫(撥出)":"TR-O", "移庫(撥入)":"TR-I"}.get(doc_type, "ADJ")
     doc_no = f"{prefix}-{int(time.time())}"
     try:
-        ws_hist.append_row([doc_type, doc_no, str(date_str), str(sku), wh, float(qty), user, note, float(cost), str(datetime.now())])
+        # A:type, B:no, C:date, D:sku, E:wh, F:qty, G:user, H:note, I:cost, J:time, K:product_name, L:ship_method, M:ship_no
+        ws_hist.append_row([
+            doc_type, doc_no, str(date_str), str(sku), wh, float(qty), 
+            user, note, 0, str(datetime.now()), p_name, ship_method, ship_no
+        ])
         factor = -1 if doc_type in ['銷售出貨', '製造領料', '移庫(撥出)'] else 1
         update_stock_qty(sku, wh, float(qty) * factor)
         clear_cache()
         return True
-    except Exception: return False
+    except: return False
 
 def delete_transaction(doc_no):
     ws_hist = get_worksheet("History")
@@ -125,7 +129,7 @@ def delete_transaction(doc_no):
             ws_hist.delete_rows(row_num)
         clear_cache()
         return True
-    except Exception: return False
+    except: return False
 
 def generate_auto_sku(series, category, existing_skus_set):
     prefix = PREFIX_MAP.get(series, PREFIX_MAP.get(category, "XX"))
@@ -145,8 +149,7 @@ def add_product(sku, name, category, series, spec, note, color):
             ws_stock.append_rows([[str(sku), wh, 0.0] for wh in WAREHOUSES])
         clear_cache()
         return True, "✅ 新增成功"
-    except Exception as e:
-        return False, str(e)
+    except: return False, "連線錯誤"
 
 def update_product(sku, new_data):
     ws = get_worksheet("Products")
@@ -159,7 +162,7 @@ def update_product(sku, new_data):
         if 'note' in new_data: ws.update_cell(row, 7, new_data['note'])
         clear_cache()
         return True
-    except Exception: return False
+    except: return False
 
 def get_stock_overview():
     df_prod = load_data("Products")
@@ -275,7 +278,7 @@ def update_order_status(order_no, new_status):
     except Exception:
         return False
 
-def ship_order(order_no, keyer):
+def ship_order(order_no, keyer, ship_method="", ship_no=""):
     items = load_order_items(order_no)
     if items.empty:
         return False, "找不到訂單品項"
@@ -284,7 +287,7 @@ def ship_order(order_no, keyer):
             "銷售出貨", date.today(),
             str(item['sku']), str(item['warehouse']),
             float(item['qty']), keyer,
-            f"訂單出貨: {order_no}"
+            f"訂單出貨: {order_no}", ship_method, ship_no
         )
         if not ok:
             return False, f"品項 {item['sku']} 出貨失敗"
@@ -325,7 +328,9 @@ def render_history_table(doc_type_filter=None):
         doc_no = str(row.get('doc_no', ''))
         c1.text(doc_no[-10:]); c2.text(row.get('date', ''))
         sku = str(row.get('sku',''))
-        c3.text(f"{sku_map.get(sku, '未知')}\n({sku})")
+        # 優先抓取 History 存的品名，若無則查 Products
+        d_name = row.get('product_name', sku_map.get(sku, '未知'))
+        c3.text(f"{d_name}\n({sku})")
         c4.text(row.get('warehouse', ''))
         c5.text(row.get('qty', 0)); c6.text(row.get('user', '')); c7.text(row.get('note', ''))
         if c8.button("🗑️", key=f"del_{doc_no}_{idx}"):
@@ -337,12 +342,13 @@ def render_history_table(doc_type_filter=None):
 # ==========================================
 st.set_page_config(page_title=PAGE_TITLE, layout="wide", page_icon="💎")
 st.title(f"💎 {PAGE_TITLE}")
-if not get_client(): st.stop()
 
 with st.sidebar:
     st.header("功能選單")
-    page = st.sidebar.radio("前往", ["📦 商品管理", "📦 移庫作業", "📥 進貨作業", "🚚 出貨作業", "🛒 訂單管理", "🔨 製造作業", "📊 報表查詢"])
-    if st.button("🔄 強制重新讀取"): clear_cache(); st.rerun()
+    page = st.radio("前往", ["📦 商品管理", "📦 移庫作業", "📥 進貨作業", "🚚 出貨作業", "🛒 訂單管理", "🔨 製造作業", "📊 報表查詢"])
+    if st.button("🔄 強制刷新資料"):
+        clear_cache()
+        st.rerun()
 
 # --- 📦 商品管理 ---
 if page == "📦 商品管理":
@@ -357,8 +363,7 @@ if page == "📦 商品管理":
         final_cat = c_cat.text_input("✍️ 新分類名稱") if cat_opt == "➕ 手動輸入新分類..." else cat_opt
         if cat_opt != "➕ 手動輸入新分類..." and not current_df.empty:
             filtered_sers = current_df[current_df['category'] == cat_opt]['series'].unique().tolist()
-            final_ser_list = sorted(list(set(filtered_sers)))
-            if not final_ser_list: final_ser_list = sorted(SERIES)
+            final_ser_list = sorted(list(set(filtered_sers))) if filtered_sers else sorted(SERIES)
         else: final_ser_list = sorted(SERIES)
         ser_opt = c_ser.selectbox("2. 系列", final_ser_list + ["➕ 手動輸入新系列..."])
         final_ser = c_ser.text_input("✍️ 新系列名稱") if ser_opt == "➕ 手動輸入新系列..." else ser_opt
@@ -367,27 +372,28 @@ if page == "📦 商品管理":
         sku = c1.text_input("3. 貨號", value=auto_sku)
         name = c2.text_input("4. 品名 *必填")
         v_spec = st.text_input("5. 規格"); v_color = st.text_input("6. 顏色"); note = st.text_input("7. 備註")
-        if st.button("✨ 確認新增商品", use_container_width=True):
+        if st.button("✨ 確認新增商品"):
             if sku and name:
                 s, m = add_product(sku, name, final_cat, final_ser, v_spec, note, v_color)
-                if s: st.success(m); clear_cache(); time.sleep(1); st.rerun()
+                if s: st.success("新增成功"); time.sleep(1); st.rerun()
     with t2:
-        df_p_formatted = get_formatted_product_df()
-        if not df_p_formatted.empty:
-            all_labels = df_p_formatted['label'].tolist()
-            sel_label = st.selectbox("🔍 選擇商品", options=all_labels)
-            sel_sku = sel_label.split(" | ")[0]
-            curr = df_p_formatted[df_p_formatted['sku'].astype(str) == sel_sku].iloc[0]
-            with st.form("edit"):
-                n_name = st.text_input("品名", value=curr['name'])
-                n_spec = st.text_input("規格", value=curr['spec'])
-                n_color = st.text_input("顏色", value=curr['color'])
-                n_note = st.text_input("備註", value=curr['note'])
-                if st.form_submit_button("💾 儲存修改"):
-                    if update_product(sel_sku, {'name': n_name, 'spec': n_spec, 'color': n_color, 'note': n_note}):
-                        st.success("✅ 更新成功"); time.sleep(1); st.rerun()
+        df_p_f = get_formatted_product_df()
+        if not df_p_f.empty:
+            sel_l = st.selectbox("🔍 選擇商品", options=df_p_f['label'].tolist())
+            if sel_l:
+                sku_s = sel_l.split(" | ")[0]
+                curr = df_p_f[df_p_f['sku'].astype(str) == sku_s].iloc[0]
+                with st.form("edit_f"):
+                    n_n = st.text_input("品名", value=str(curr['name']))
+                    n_s = st.text_input("規格", value=str(curr['spec']))
+                    n_c = st.text_input("顏色", value=str(curr['color']))
+                    n_nt = st.text_input("備註", value=str(curr['note']))
+                    if st.form_submit_button("💾 儲存修改"):
+                        if update_product(sku_s, {'name': n_n, 'spec': n_s, 'color': n_c, 'note': n_nt}):
+                            st.success("✅ 更新成功"); time.sleep(1); st.rerun()
+        else: st.warning("⚠️ 資料庫為空，請先新增商品。")
 
-# --- 其餘功能模組 ---
+# --- 📦 移庫作業 ---
 elif page == "📦 移庫作業":
     st.subheader("📦 倉庫間移庫")
     prods = get_formatted_product_df()
@@ -408,6 +414,7 @@ elif page == "📦 移庫作業":
                     st.success("✅ 移庫完成"); time.sleep(1); st.rerun()
     render_history_table(["移庫(撥出)", "移庫(撥入)"])
 
+# --- 📥 進貨作業 ---
 elif page == "📥 進貨作業":
     st.subheader("📥 進貨入庫")
     prods = get_formatted_product_df()
@@ -418,33 +425,42 @@ elif page == "📥 進貨作業":
             qty = st.number_input("數量", min_value=1.0, value=1.0)
             user = st.selectbox("經手人", KEYERS)
             if st.form_submit_button("執行進貨"):
-                if add_transaction("進貨", date.today(), sel_p.split(" | ")[0], wh, qty, user, ""):
+                sku_only = sel_p.split(" | ")[0]
+                if add_transaction("進貨", date.today(), sku_only, wh, qty, user, ""):
                     st.success("✅ 進貨成功"); time.sleep(1); st.rerun()
     render_history_table("進貨")
 
+# --- 🚚 出貨作業 ---
 elif page == "🚚 出貨作業":
     st.subheader("🚚 銷售出貨 (多品項清單)")
     if 'out_list' not in st.session_state: st.session_state['out_list'] = []
-    order_id = st.text_input("訂單/備註")
-    user = st.selectbox("經手人", KEYERS, index=3)
+    col_a, col_b, col_c = st.columns(3)
+    ship_opt = col_a.selectbox("寄送方式", SHIPPING_METHODS + ["➕ 手動輸入..."])
+    final_ship = col_a.text_input("✍️ 自訂方式") if ship_opt == "➕ 手動輸入..." else ship_opt
+    ship_no = col_b.text_input("配送號碼")
+    user = col_c.selectbox("經手人", KEYERS, index=3)
+    order_id = st.text_input("訂單編號 / 備註")
+    st.divider()
     prods = get_formatted_product_df()
     if not prods.empty:
         col1, col2, col3 = st.columns([3, 1, 1])
         sel_p = col1.selectbox("挑選商品", prods['label'])
-        wh = col2.selectbox("倉庫", WAREHOUSES, index=3); qty = col3.number_input("數量", min_value=1.0, value=1.0)
-        if st.button("⬇️ 加入清單"):
+        wh = col2.selectbox("倉庫", WAREHOUSES, index=3); qty = col3.number_input("數量", 1.0)
+        if st.button("⬇️ 加入待出貨清單"):
             st.session_state['out_list'].append({'sku': sel_p.split(" | ")[0], 'name': sel_p.split(" | ")[1], 'wh': wh, 'qty': qty})
             st.rerun()
     if st.session_state['out_list']:
         for i, item in enumerate(st.session_state['out_list']):
-            st.write(f"🔸 **{item['name']}** - {item['wh']} x{item['qty']}")
-            if st.button("❌", key=f"rm_o_{i}"): st.session_state['out_list'].pop(i); st.rerun()
-        if st.button("✅ 批次確認出貨", type="primary"):
+            c_l, c_d = st.columns([5, 1])
+            c_l.write(f"🔸 **{item['name']}** - {item['wh']} x{item['qty']}")
+            if c_d.button("❌", key=f"rm_o_{i}"): st.session_state['out_list'].pop(i); st.rerun()
+        if st.button("✅ 確認出貨", type="primary", use_container_width=True):
             for x in st.session_state['out_list']:
-                add_transaction("銷售出貨", date.today(), x['sku'], x['wh'], x['qty'], user, order_id)
+                add_transaction("銷售出貨", date.today(), x['sku'], x['wh'], x['qty'], user, order_id, final_ship, ship_no)
             st.session_state['out_list'] = []; st.success("🎉 出貨完成"); time.sleep(1); st.rerun()
     render_history_table("銷售出貨")
 
+# --- 🛒 訂單管理 ---
 elif page == "🛒 訂單管理":
     st.subheader("🛒 訂單管理系統")
     tab_new, tab_list, tab_detail = st.tabs(["📝 新增訂單", "📋 訂單列表", "🔍 訂單明細"])
@@ -461,7 +477,7 @@ elif page == "🛒 訂單管理":
         cust_email = cc3.text_input("Email", key="o_cemail")
         ship_addr = cc4.text_input("寄送地址", key="o_caddr")
         o_note = st.text_input("訂單備註", key="o_note")
-        o_user = st.selectbox("建立人", KEYERS, key="o_user")
+        o_user = st.selectbox("建立人", ["James", "Imeng", "小幫手"], key="o_user")
 
         st.markdown("##### 加入商品")
         prods = get_formatted_product_df()
@@ -569,16 +585,18 @@ elif page == "🛒 訂單管理":
                             update_order_status(ono, "已取消")
                             st.rerun()
                     if status == "處理中":
-                        ship_user = bc1.selectbox("出貨經手人", KEYERS, key=f"os_ship_u_{ono}")
-                        if bc2.button("🚚 確認出貨", key=f"os_ship_{ono}"):
-                            ok, msg = ship_order(ono, ship_user)
+                        ship_user = bc1.selectbox("出貨經手人", ["James", "Imeng", "小幫手"], key=f"os_ship_u_{ono}")
+                        s_method = bc2.selectbox("寄送方式", SHIPPING_METHODS, key=f"os_ship_m_{ono}")
+                        s_no = bc3.text_input("配送號碼", key=f"os_ship_n_{ono}")
+                        if bc4.button("🚚 確認出貨", key=f"os_ship_{ono}"):
+                            ok, msg = ship_order(ono, ship_user, s_method, s_no)
                             if ok:
                                 st.success(msg)
                                 time.sleep(1)
                                 st.rerun()
                             else:
                                 st.error(msg)
-                        if bc4.button("🔴 取消", key=f"os_cancel2_{ono}"):
+                        if bc5.button("🔴 取消", key=f"os_cancel2_{ono}"):
                             update_order_status(ono, "已取消")
                             st.rerun()
                     if status == "已出貨":
@@ -627,6 +645,7 @@ elif page == "🛒 訂單管理":
         else:
             st.info("目前沒有任何訂單")
 
+# --- 🔨 製造作業 ---
 elif page == "🔨 製造作業":
     st.subheader("🔨 生產與拆解管理")
     if 'm_in_list' not in st.session_state: st.session_state['m_in_list'] = []
@@ -671,6 +690,7 @@ elif page == "🔨 製造作業":
                     st.success("OK"); time.sleep(1); st.rerun()
     render_history_table(["製造領料", "製造入庫"])
 
+# --- 📊 報表查詢 ---
 elif page == "📊 報表查詢":
     st.subheader("📊 庫存報表")
     df = get_stock_overview()
