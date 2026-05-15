@@ -9,7 +9,7 @@ import time
 # 1. 系統基礎設定
 # ==========================================
 PAGE_TITLE = "numbertalk 雲端庫存系統"
-SPREADSHEET_NAME = "numbertalk-system" 
+SPREADSHEET_NAME = "numbertalk-system"
 
 WAREHOUSES = ["Wen", "千畇", "James", "Imeng"]
 CATEGORIES = ["天然石", "金屬配件", "線材", "包裝材料", "完成品", "數字珠", "數字串", "香料", "手作設備"]
@@ -46,15 +46,14 @@ def get_worksheet(sheet_name):
     try: return client.open(SPREADSHEET_NAME).worksheet(sheet_name)
     except: return None
 
-@st.cache_data(ttl=5) 
+@st.cache_data(ttl=5)
 def load_data(sheet_name):
     ws = get_worksheet(sheet_name)
     if ws is None: return pd.DataFrame()
     try:
         data = ws.get_all_records()
         df = pd.DataFrame(data)
-        # 確保基礎欄位存在
-        for col in ['sku', 'name', 'category', 'series', 'spec', 'color', 'note']:
+        for col in ['sku', 'name', 'category', 'series', 'spec', 'color', 'note', 'price']:
             if col not in df.columns: df[col] = ""
         return df.fillna("")
     except: return pd.DataFrame()
@@ -92,9 +91,8 @@ def update_stock_qty(sku, warehouse, delta_qty):
             ws.append_row([str(sku), warehouse, delta_qty])
     except: pass
 
-def add_transaction(doc_type, date_str, sku, wh, qty, user, note, ship_method="", ship_no=""):
+def add_transaction(doc_type, date_str, sku, wh, qty, user, note, ship_method="", ship_no="", cost=0):
     ws_hist = get_worksheet("History")
-    # 自動抓取品名填入 K 欄
     df_p = load_data("Products")
     p_name = ""
     if not df_p.empty:
@@ -106,8 +104,8 @@ def add_transaction(doc_type, date_str, sku, wh, qty, user, note, ship_method=""
     try:
         # A:type, B:no, C:date, D:sku, E:wh, F:qty, G:user, H:note, I:cost, J:time, K:product_name, L:ship_method, M:ship_no
         ws_hist.append_row([
-            doc_type, doc_no, str(date_str), str(sku), wh, float(qty), 
-            user, note, 0, str(datetime.now()), p_name, ship_method, ship_no
+            doc_type, doc_no, str(date_str), str(sku), wh, float(qty),
+            user, note, float(cost), str(datetime.now()), p_name, ship_method, ship_no
         ])
         factor = -1 if doc_type in ['銷售出貨', '製造領料', '移庫(撥出)'] else 1
         update_stock_qty(sku, wh, float(qty) * factor)
@@ -135,15 +133,15 @@ def generate_auto_sku(series, category, existing_skus_set):
     prefix = PREFIX_MAP.get(series, PREFIX_MAP.get(category, "XX"))
     count = 1
     while True:
-        candidate = f"{prefix}-{count:03d}" 
+        candidate = f"{prefix}-{count:03d}"
         if candidate not in existing_skus_set: return candidate
         count += 1
         if count > 999: return f"{prefix}-{int(time.time())}"
 
-def add_product(sku, name, category, series, spec, note, color):
+def add_product(sku, name, category, series, spec, note, color, price=0):
     ws = get_worksheet("Products")
     try:
-        ws.append_row([str(sku), series, category, name, spec, color, note])
+        ws.append_row([str(sku), series, category, name, spec, color, note, float(price)])
         ws_stock = get_worksheet("Stock")
         if ws_stock:
             ws_stock.append_rows([[str(sku), wh, 0.0] for wh in WAREHOUSES])
@@ -160,6 +158,7 @@ def update_product(sku, new_data):
         if 'spec' in new_data: ws.update_cell(row, 5, new_data['spec'])
         if 'color' in new_data: ws.update_cell(row, 6, new_data['color'])
         if 'note' in new_data: ws.update_cell(row, 7, new_data['note'])
+        if 'price' in new_data: ws.update_cell(row, 8, float(new_data['price']))
         clear_cache()
         return True
     except: return False
@@ -181,7 +180,7 @@ def get_stock_overview():
             if wh not in pivot.columns: pivot[wh] = 0.0
         pivot['總庫存'] = pivot[WAREHOUSES].sum(axis=1)
         result = pd.merge(df_prod, pivot, on='sku', how='left').fillna(0)
-    target_cols = ['sku', 'series', 'category', 'name', 'spec', 'color', 'note', '總庫存'] + WAREHOUSES
+    target_cols = ['sku', 'series', 'category', 'name', 'spec', 'color', 'price', 'note', '總庫存'] + WAREHOUSES
     return result[[c for c in target_cols if c in result.columns]]
 
 # ==========================================
@@ -232,6 +231,7 @@ def create_order(order_no, order_date, customer_name, customer_phone,
                 float(item['subtotal']), item['warehouse']
             ])
         clear_cache()
+        save_member(customer_name, customer_phone, customer_email, shipping_address)
         return True, f"✅ 訂單 {order_no} 建立成功，總金額 ${total:,.0f}"
     except Exception as e:
         return False, f"❌ 建立失敗: {e}"
@@ -312,6 +312,96 @@ def delete_order(order_no):
     except Exception:
         return False
 
+# ==========================================
+# 3.6 會員名單核心功能
+# ==========================================
+
+def ensure_members_sheet():
+    client = get_client()
+    if not client:
+        return
+    try:
+        sh = client.open(SPREADSHEET_NAME)
+        existing = [ws.title for ws in sh.worksheets()]
+        if "Members" not in existing:
+            ws = sh.add_worksheet(title="Members", rows=2000, cols=8)
+            ws.append_row(["member_id", "name", "phone", "email", "address",
+                           "note", "created_at", "last_order_date"])
+    except Exception:
+        pass
+
+def load_members():
+    ensure_members_sheet()
+    df = load_data("Members")
+    if df.empty:
+        return pd.DataFrame(columns=["member_id", "name", "phone", "email",
+                                      "address", "note", "created_at", "last_order_date"])
+    return df
+
+def find_member_by_name(name):
+    df = load_members()
+    if df.empty:
+        return None
+    match = df[df['name'].astype(str) == str(name)]
+    return match.iloc[0] if not match.empty else None
+
+def save_member(name, phone, email, address, note=""):
+    ensure_members_sheet()
+    ws = get_worksheet("Members")
+    if not ws:
+        return False
+    try:
+        existing = load_members()
+        if not existing.empty:
+            match = existing[existing['name'].astype(str) == str(name)]
+            if not match.empty:
+                all_vals = ws.get_all_values()
+                header = all_vals[0]
+                name_idx = header.index("name")
+                for i, row in enumerate(all_vals[1:], 2):
+                    if str(row[name_idx]) == str(name):
+                        ph_idx = header.index("phone")
+                        em_idx = header.index("email")
+                        ad_idx = header.index("address")
+                        dt_idx = header.index("last_order_date")
+                        if phone:
+                            ws.update_cell(i, ph_idx + 1, phone)
+                        if email:
+                            ws.update_cell(i, em_idx + 1, email)
+                        if address:
+                            ws.update_cell(i, ad_idx + 1, address)
+                        ws.update_cell(i, dt_idx + 1, str(date.today()))
+                        clear_cache()
+                        return True
+        mid = f"M-{int(time.time()) % 100000:05d}"
+        ws.append_row([mid, name, phone, email, address, note,
+                       str(datetime.now()), str(date.today())])
+        clear_cache()
+        return True
+    except Exception:
+        return False
+
+def delete_member(name):
+    ws = get_worksheet("Members")
+    if not ws:
+        return False
+    try:
+        all_vals = ws.get_all_values()
+        header = all_vals[0]
+        name_idx = header.index("name")
+        for i, row in enumerate(all_vals[1:], 2):
+            if str(row[name_idx]) == str(name):
+                ws.delete_rows(i)
+                clear_cache()
+                return True
+        return False
+    except Exception:
+        return False
+
+# ==========================================
+# 3.7 歷史紀錄顯示
+# ==========================================
+
 def render_history_table(doc_type_filter=None):
     st.markdown("#### 🕒 最近紀錄")
     df = load_data("History")
@@ -328,7 +418,6 @@ def render_history_table(doc_type_filter=None):
         doc_no = str(row.get('doc_no', ''))
         c1.text(doc_no[-10:]); c2.text(row.get('date', ''))
         sku = str(row.get('sku',''))
-        # 優先抓取 History 存的品名，若無則查 Products
         d_name = row.get('product_name', sku_map.get(sku, '未知'))
         c3.text(f"{d_name}\n({sku})")
         c4.text(row.get('warehouse', ''))
@@ -345,7 +434,7 @@ st.title(f"💎 {PAGE_TITLE}")
 
 with st.sidebar:
     st.header("功能選單")
-    page = st.radio("前往", ["🛒 訂單管理", "🔨 製造作業", "🚚 出貨作業", "📦 商品管理", "📥 進貨作業", "📦 移庫作業", "📊 報表查詢"])
+    page = st.radio("前往", ["🛒 訂單管理", "👥 會員管理", "🔨 製造作業", "🚚 出貨作業", "📦 商品管理", "📥 進貨作業", "📦 移庫作業", "📊 報表查詢"])
     if st.button("🔄 強制刷新資料"):
         clear_cache()
         st.rerun()
@@ -371,10 +460,13 @@ if page == "📦 商品管理":
         c1, c2 = st.columns(2)
         sku = c1.text_input("3. 貨號", value=auto_sku)
         name = c2.text_input("4. 品名 *必填")
-        v_spec = st.text_input("5. 規格"); v_color = st.text_input("6. 顏色"); note = st.text_input("7. 備註")
+        v_spec = st.text_input("5. 規格"); v_color = st.text_input("6. 顏色")
+        pc1, pc2 = st.columns(2)
+        v_price = pc1.number_input("7. 售價", min_value=0.0, value=0.0, step=10.0)
+        note = pc2.text_input("8. 備註")
         if st.button("✨ 確認新增商品"):
             if sku and name:
-                s, m = add_product(sku, name, final_cat, final_ser, v_spec, note, v_color)
+                s, m = add_product(sku, name, final_cat, final_ser, v_spec, note, v_color, v_price)
                 if s: st.success("新增成功"); time.sleep(1); st.rerun()
     with t2:
         df_p_f = get_formatted_product_df()
@@ -387,9 +479,11 @@ if page == "📦 商品管理":
                     n_n = st.text_input("品名", value=str(curr['name']))
                     n_s = st.text_input("規格", value=str(curr['spec']))
                     n_c = st.text_input("顏色", value=str(curr['color']))
+                    cur_price = float(curr['price']) if curr.get('price', '') not in ['', None] else 0.0
+                    n_p = st.number_input("售價", min_value=0.0, value=cur_price, step=10.0)
                     n_nt = st.text_input("備註", value=str(curr['note']))
                     if st.form_submit_button("💾 儲存修改"):
-                        if update_product(sku_s, {'name': n_n, 'spec': n_s, 'color': n_c, 'note': n_nt}):
+                        if update_product(sku_s, {'name': n_n, 'spec': n_s, 'color': n_c, 'note': n_nt, 'price': n_p}):
                             st.success("✅ 更新成功"); time.sleep(1); st.rerun()
         else: st.warning("⚠️ 資料庫為空，請先新增商品。")
 
@@ -421,12 +515,16 @@ elif page == "📥 進貨作業":
     if not prods.empty:
         with st.form("in_form"):
             sel_p = st.selectbox("商品", prods['label'])
-            wh = st.selectbox("倉庫", WAREHOUSES)
-            qty = st.number_input("數量", min_value=1.0, value=1.0)
-            user = st.selectbox("經手人", KEYERS)
+            in_c1, in_c2 = st.columns(2)
+            wh = in_c1.selectbox("倉庫", WAREHOUSES)
+            qty = in_c2.number_input("數量", min_value=1.0, value=1.0)
+            in_c3, in_c4 = st.columns(2)
+            in_cost = in_c3.number_input("成本 (總額)", min_value=0.0, value=0.0, step=10.0)
+            user = in_c4.selectbox("經手人", KEYERS)
+            in_note = st.text_input("備註 (成本明細)")
             if st.form_submit_button("執行進貨"):
                 sku_only = sel_p.split(" | ")[0]
-                if add_transaction("進貨", date.today(), sku_only, wh, qty, user, ""):
+                if add_transaction("進貨", date.today(), sku_only, wh, qty, user, in_note, cost=in_cost):
                     st.success("✅ 進貨成功"); time.sleep(1); st.rerun()
     render_history_table("進貨")
 
@@ -470,12 +568,25 @@ elif page == "🛒 訂單管理":
             st.session_state['order_items'] = []
 
         st.markdown("##### 客戶資訊")
+        members_df = load_members()
+        member_names = ["-- 手動輸入 --"] + members_df['name'].astype(str).tolist() if not members_df.empty else ["-- 手動輸入 --"]
+        sel_member = st.selectbox("📋 從會員名單帶入", member_names, key="o_member_sel")
+
+        if sel_member != "-- 手動輸入 --":
+            m = find_member_by_name(sel_member)
+            def_name = str(m['name']) if m is not None else ""
+            def_phone = str(m['phone']) if m is not None else ""
+            def_email = str(m['email']) if m is not None else ""
+            def_addr = str(m['address']) if m is not None else ""
+        else:
+            def_name, def_phone, def_email, def_addr = "", "", "", ""
+
         cc1, cc2 = st.columns(2)
-        cust_name = cc1.text_input("客戶名稱 *必填", key="o_cname")
-        cust_phone = cc2.text_input("聯絡電話", key="o_cphone")
+        cust_name = cc1.text_input("客戶名稱 *必填", value=def_name, key="o_cname")
+        cust_phone = cc2.text_input("聯絡電話", value=def_phone, key="o_cphone")
         cc3, cc4 = st.columns(2)
-        cust_email = cc3.text_input("Email", key="o_cemail")
-        ship_addr = cc4.text_input("寄送地址", key="o_caddr")
+        cust_email = cc3.text_input("Email", value=def_email, key="o_cemail")
+        ship_addr = cc4.text_input("寄送地址", value=def_addr, key="o_caddr")
         o_note = st.text_input("訂單備註", key="o_note")
         o_user = st.selectbox("建立人", ["James", "Imeng", "小幫手"], key="o_user")
 
@@ -486,7 +597,10 @@ elif page == "🛒 訂單管理":
             o_sel = oc1.selectbox("選擇商品", prods['label'], key="o_psel")
             o_wh = oc2.selectbox("出貨倉庫", WAREHOUSES, key="o_pwh")
             o_qty = oc3.number_input("數量", min_value=1.0, value=1.0, key="o_pqty")
-            o_price = oc4.number_input("單價", min_value=0.0, value=0.0, step=10.0, key="o_pprice")
+            sel_sku = o_sel.split(" | ")[0]
+            sel_row = prods[prods['sku'].astype(str) == sel_sku]
+            default_price = float(sel_row.iloc[0]['price']) if not sel_row.empty and sel_row.iloc[0].get('price', '') not in ['', None] else 0.0
+            o_price = oc4.number_input("單價", min_value=0.0, value=default_price, step=10.0, key="o_pprice")
 
             if st.button("⬇️ 加入訂單", key="o_add_item"):
                 sku = o_sel.split(" | ")[0]
@@ -644,6 +758,76 @@ elif page == "🛒 訂單管理":
                     )
         else:
             st.info("目前沒有任何訂單")
+
+# --- 👥 會員管理 ---
+elif page == "👥 會員管理":
+    st.subheader("👥 會員名單管理")
+    tab_m_list, tab_m_add = st.tabs(["📋 會員列表", "➕ 手動新增會員"])
+
+    with tab_m_list:
+        df_members = load_members()
+        if df_members.empty:
+            st.info("目前沒有任何會員，建立訂單時會自動儲存客戶為會員。")
+        else:
+            m_search = st.text_input("🔍 搜尋會員 (姓名/電話)", key="m_search")
+            filtered_m = df_members.copy()
+            if m_search:
+                mask = (
+                    filtered_m['name'].astype(str).str.contains(m_search, case=False, na=False) |
+                    filtered_m['phone'].astype(str).str.contains(m_search, case=False, na=False)
+                )
+                filtered_m = filtered_m[mask]
+
+            st.markdown(f"共 **{len(filtered_m)}** 位會員")
+            st.dataframe(
+                filtered_m[['name', 'phone', 'email', 'address', 'last_order_date']].rename(
+                    columns={'name': '姓名', 'phone': '電話', 'email': 'Email',
+                             'address': '地址', 'last_order_date': '最後訂單日期'}
+                ),
+                use_container_width=True, hide_index=True
+            )
+
+            st.markdown("---")
+            st.markdown("##### 編輯 / 刪除會員")
+            m_names = filtered_m['name'].astype(str).tolist()
+            if m_names:
+                sel_m = st.selectbox("選擇會員", m_names, key="m_edit_sel")
+                m_data = find_member_by_name(sel_m)
+                if m_data is not None:
+                    with st.form("edit_member"):
+                        em_phone = st.text_input("電話", value=str(m_data.get('phone', '')))
+                        em_email = st.text_input("Email", value=str(m_data.get('email', '')))
+                        em_addr = st.text_input("地址", value=str(m_data.get('address', '')))
+                        if st.form_submit_button("💾 儲存修改"):
+                            save_member(sel_m, em_phone, em_email, em_addr)
+                            st.success("✅ 會員資料已更新")
+                            time.sleep(1)
+                            st.rerun()
+                    if st.button("🗑️ 刪除此會員", key="m_del"):
+                        delete_member(sel_m)
+                        st.success("✅ 已刪除")
+                        time.sleep(1)
+                        st.rerun()
+
+    with tab_m_add:
+        with st.form("add_member"):
+            am_name = st.text_input("姓名 *必填")
+            am_c1, am_c2 = st.columns(2)
+            am_phone = am_c1.text_input("電話")
+            am_email = am_c2.text_input("Email")
+            am_addr = st.text_input("地址")
+            am_note = st.text_input("備註")
+            if st.form_submit_button("✅ 新增會員", use_container_width=True):
+                if not am_name:
+                    st.error("❌ 請填寫姓名")
+                else:
+                    existing = find_member_by_name(am_name)
+                    if existing is not None:
+                        st.warning(f"⚠️ 會員 '{am_name}' 已存在，將更新資料")
+                    save_member(am_name, am_phone, am_email, am_addr, am_note)
+                    st.success(f"✅ 會員 '{am_name}' 已儲存")
+                    time.sleep(1)
+                    st.rerun()
 
 # --- 🔨 製造作業 ---
 elif page == "🔨 製造作業":
