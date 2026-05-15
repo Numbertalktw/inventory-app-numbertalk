@@ -51,8 +51,12 @@ def load_data(sheet_name):
     ws = get_worksheet(sheet_name)
     if ws is None: return pd.DataFrame()
     try:
-        data = ws.get_all_records()
-        df = pd.DataFrame(data)
+        all_vals = ws.get_all_values()
+        if not all_vals or len(all_vals) < 2: return pd.DataFrame()
+        header = all_vals[0]
+        rows = all_vals[1:]
+        padded = [row + [''] * (len(header) - len(row)) for row in rows]
+        df = pd.DataFrame(padded, columns=header)
         for col in ['sku', 'name', 'category', 'series', 'spec', 'color', 'note', 'price']:
             if col not in df.columns: df[col] = ""
         return df.fillna("")
@@ -64,7 +68,27 @@ def clear_cache(): load_data.clear()
 # 3. 核心功能函式
 # ==========================================
 
+def ensure_price_column():
+    ws = get_worksheet("Products")
+    if not ws:
+        return
+    try:
+        header = ws.row_values(1)
+        if 'price' in header:
+            return
+        expected = ['sku', 'series', 'category', 'name', 'spec', 'color', 'note']
+        if header[:7] == expected:
+            if len(header) < 8 or header[7] == '':
+                ws.update_cell(1, 8, 'price')
+            else:
+                ws.update_cell(1, len(header) + 1, 'price')
+        else:
+            ws.update_cell(1, len(header) + 1, 'price')
+    except:
+        pass
+
 def get_formatted_product_df():
+    ensure_price_column()
     df = load_data("Products")
     if df.empty: return df
     df['sku'] = df['sku'].astype(str)
@@ -139,9 +163,18 @@ def generate_auto_sku(series, category, existing_skus_set):
         if count > 999: return f"{prefix}-{int(time.time())}"
 
 def add_product(sku, name, category, series, spec, note, color, price=0):
+    ensure_price_column()
     ws = get_worksheet("Products")
     try:
-        ws.append_row([str(sku), series, category, name, spec, color, note, float(price)])
+        header = ws.row_values(1)
+        row_data = [''] * len(header)
+        col_map = {h: i for i, h in enumerate(header)}
+        for key, val in [('sku', str(sku)), ('series', series), ('category', category),
+                         ('name', name), ('spec', spec), ('color', color),
+                         ('note', note), ('price', float(price))]:
+            if key in col_map:
+                row_data[col_map[key]] = val
+        ws.append_row(row_data)
         ws_stock = get_worksheet("Stock")
         if ws_stock:
             ws_stock.append_rows([[str(sku), wh, 0.0] for wh in WAREHOUSES])
@@ -150,15 +183,17 @@ def add_product(sku, name, category, series, spec, note, color, price=0):
     except: return False, "連線錯誤"
 
 def update_product(sku, new_data):
+    ensure_price_column()
     ws = get_worksheet("Products")
     try:
+        header = ws.row_values(1)
+        col_map = {h: i + 1 for i, h in enumerate(header)}
         cell = ws.find(str(sku))
         row = cell.row
-        if 'name' in new_data: ws.update_cell(row, 4, new_data['name'])
-        if 'spec' in new_data: ws.update_cell(row, 5, new_data['spec'])
-        if 'color' in new_data: ws.update_cell(row, 6, new_data['color'])
-        if 'note' in new_data: ws.update_cell(row, 7, new_data['note'])
-        if 'price' in new_data: ws.update_cell(row, 8, float(new_data['price']))
+        for key in ['name', 'spec', 'color', 'note', 'price']:
+            if key in new_data and key in col_map:
+                val = float(new_data[key]) if key == 'price' else new_data[key]
+                ws.update_cell(row, col_map[key], val)
         clear_cache()
         return True
     except: return False
@@ -198,7 +233,8 @@ def ensure_order_sheets():
             ws = sh.add_worksheet(title="Orders", rows=1000, cols=15)
             ws.append_row(["order_no", "order_date", "customer_name", "customer_phone",
                            "customer_email", "shipping_address", "status", "total_amount",
-                           "note", "created_by", "created_at"])
+                           "note", "created_by", "created_at", "discount", "shipping_fee",
+                           "items_total"])
         if "OrderItems" not in existing:
             ws = sh.add_worksheet(title="OrderItems", rows=5000, cols=8)
             ws.append_row(["order_no", "sku", "product_name", "qty", "unit_price",
@@ -211,18 +247,21 @@ def generate_order_no():
     return f"ORD-{now.strftime('%Y%m%d')}-{int(time.time()) % 100000:05d}"
 
 def create_order(order_no, order_date, customer_name, customer_phone,
-                 customer_email, shipping_address, items, note, created_by):
+                 customer_email, shipping_address, items, note, created_by,
+                 discount=0, shipping_fee=0):
     ensure_order_sheets()
     ws_orders = get_worksheet("Orders")
     ws_items = get_worksheet("OrderItems")
     if not ws_orders or not ws_items:
         return False, "無法連線到工作表"
     try:
-        total = sum(item['subtotal'] for item in items)
+        items_total = sum(item['subtotal'] for item in items)
+        total = items_total - float(discount) + float(shipping_fee)
         ws_orders.append_row([
             order_no, str(order_date), customer_name, customer_phone,
             customer_email, shipping_address, "待處理", float(total),
-            note, created_by, str(datetime.now())
+            note, created_by, str(datetime.now()),
+            float(discount), float(shipping_fee), float(items_total)
         ])
         for item in items:
             ws_items.append_row([
@@ -232,7 +271,7 @@ def create_order(order_no, order_date, customer_name, customer_phone,
             ])
         clear_cache()
         save_member(customer_name, customer_phone, customer_email, shipping_address)
-        return True, f"✅ 訂單 {order_no} 建立成功，總金額 ${total:,.0f}"
+        return True, f"✅ 訂單 {order_no} 建立成功 | 商品 ${items_total:,.0f} - 折扣 ${discount:,.0f} + 運費 ${shipping_fee:,.0f} = 總計 ${total:,.0f}"
     except Exception as e:
         return False, f"❌ 建立失敗: {e}"
 
@@ -245,6 +284,10 @@ def load_orders():
                                       "shipping_address", "status", "total_amount",
                                       "note", "created_by", "created_at"])
     df['total_amount'] = pd.to_numeric(df['total_amount'], errors='coerce').fillna(0)
+    for col in ['discount', 'shipping_fee', 'items_total']:
+        if col not in df.columns:
+            df[col] = 0
+        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
     return df
 
 def load_order_items(order_no=None):
@@ -431,6 +474,7 @@ def render_history_table(doc_type_filter=None):
 # ==========================================
 st.set_page_config(page_title=PAGE_TITLE, layout="wide", page_icon="💎")
 st.title(f"💎 {PAGE_TITLE}")
+ensure_price_column()
 
 with st.sidebar:
     st.header("功能選單")
@@ -599,8 +643,12 @@ elif page == "🛒 訂單管理":
             o_qty = oc3.number_input("數量", min_value=1.0, value=1.0, key="o_pqty")
             sel_sku = o_sel.split(" | ")[0]
             sel_row = prods[prods['sku'].astype(str) == sel_sku]
-            default_price = float(sel_row.iloc[0]['price']) if not sel_row.empty and sel_row.iloc[0].get('price', '') not in ['', None] else 0.0
-            o_price = oc4.number_input("單價", min_value=0.0, value=default_price, step=10.0, key="o_pprice")
+            try:
+                raw_price = sel_row.iloc[0]['price'] if not sel_row.empty else 0
+                default_price = float(raw_price) if raw_price not in ['', None] else 0.0
+            except (ValueError, TypeError):
+                default_price = 0.0
+            o_price = oc4.number_input("單價", min_value=0.0, value=default_price, step=10.0, key=f"o_pprice_{sel_sku}")
 
             if st.button("⬇️ 加入訂單", key="o_add_item"):
                 sku = o_sel.split(" | ")[0]
@@ -614,7 +662,7 @@ elif page == "🛒 訂單管理":
 
         if st.session_state['order_items']:
             st.markdown("##### 訂單品項")
-            total = 0
+            items_total = 0
             for i, item in enumerate(st.session_state['order_items']):
                 ic1, ic2, ic3, ic4, ic5 = st.columns([3, 1, 1, 1, 0.5])
                 ic1.write(f"**{item['product_name']}** ({item['sku']})")
@@ -624,8 +672,17 @@ elif page == "🛒 訂單管理":
                 if ic5.button("❌", key=f"o_rm_{i}"):
                     st.session_state['order_items'].pop(i)
                     st.rerun()
-                total += item['subtotal']
-            st.markdown(f"### 💰 訂單總金額: **${total:,.0f}**")
+                items_total += item['subtotal']
+
+            st.markdown(f"**商品小計: ${items_total:,.0f}**")
+            st.markdown("##### 優惠折扣 / 運費")
+            df_c1, df_c2 = st.columns(2)
+            o_discount = df_c1.number_input("🏷️ 優惠折扣", min_value=0.0, value=0.0, step=10.0, key="o_discount")
+            o_ship_fee = df_c2.number_input("🚚 運費", min_value=0.0, value=0.0, step=10.0, key="o_ship_fee")
+            final_total = items_total - o_discount + o_ship_fee
+            st.markdown(f"### 💰 應付總額: **${final_total:,.0f}**")
+            if o_discount > 0 or o_ship_fee > 0:
+                st.caption(f"商品 ${items_total:,.0f} − 折扣 ${o_discount:,.0f} + 運費 ${o_ship_fee:,.0f}")
 
             if st.button("✅ 確認建立訂單", type="primary", use_container_width=True):
                 if not cust_name:
@@ -635,7 +692,8 @@ elif page == "🛒 訂單管理":
                     ok, msg = create_order(
                         ono, date.today(), cust_name, cust_phone,
                         cust_email, ship_addr,
-                        st.session_state['order_items'], o_note, o_user
+                        st.session_state['order_items'], o_note, o_user,
+                        o_discount, o_ship_fee
                     )
                     if ok:
                         st.session_state['order_items'] = []
@@ -677,6 +735,11 @@ elif page == "🛒 訂單管理":
                     dc2.write(f"📞 電話: {row.get('customer_phone', '')}")
                     dc3.write(f"📧 Email: {row.get('customer_email', '')}")
                     st.write(f"📍 地址: {row.get('shipping_address', '')}")
+                    r_disc = float(row.get('discount', 0))
+                    r_ship = float(row.get('shipping_fee', 0))
+                    r_items = float(row.get('items_total', 0))
+                    if r_disc > 0 or r_ship > 0:
+                        st.write(f"💰 商品 ${r_items:,.0f} − 折扣 ${r_disc:,.0f} + 運費 ${r_ship:,.0f} = **${row.get('total_amount', 0):,.0f}**")
                     if row.get('note', ''):
                         st.write(f"📝 備註: {row.get('note', '')}")
 
@@ -738,9 +801,17 @@ elif page == "🛒 訂單管理":
                 st.markdown(f"### {icon} 訂單 {sel_ono}")
                 mc1, mc2, mc3, mc4 = st.columns(4)
                 mc1.metric("狀態", status)
-                mc2.metric("總金額", f"${row.get('total_amount', 0):,.0f}")
+                mc2.metric("應付總額", f"${row.get('total_amount', 0):,.0f}")
                 mc3.metric("客戶", row.get('customer_name', ''))
                 mc4.metric("日期", row.get('order_date', ''))
+                d_disc = float(row.get('discount', 0))
+                d_ship = float(row.get('shipping_fee', 0))
+                d_items = float(row.get('items_total', 0))
+                if d_disc > 0 or d_ship > 0:
+                    dc1, dc2, dc3 = st.columns(3)
+                    dc1.metric("商品小計", f"${d_items:,.0f}")
+                    dc2.metric("優惠折扣", f"-${d_disc:,.0f}")
+                    dc3.metric("運費", f"${d_ship:,.0f}")
                 st.write(f"📞 {row.get('customer_phone', '')} | 📧 {row.get('customer_email', '')}")
                 st.write(f"📍 {row.get('shipping_address', '')}")
                 if row.get('note', ''):
