@@ -55,7 +55,8 @@ def load_data(sheet_name):
         if not all_vals or len(all_vals) < 2: return pd.DataFrame()
         header = all_vals[0]
         rows = all_vals[1:]
-        padded = [row + [''] * (len(header) - len(row)) for row in rows]
+        n = len(header)
+        padded = [(row + [''] * n)[:n] for row in rows]
         df = pd.DataFrame(padded, columns=header)
         for col in ['sku', 'name', 'category', 'series', 'spec', 'color', 'note', 'price']:
             if col not in df.columns: df[col] = ""
