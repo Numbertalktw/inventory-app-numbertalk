@@ -41,16 +41,24 @@ def get_client():
         return gspread.authorize(creds)
     except: return None
 
-def get_worksheet(sheet_name):
+@st.cache_resource
+def get_spreadsheet():
     client = get_client()
-    try: return client.open(SPREADSHEET_NAME).worksheet(sheet_name)
+    if not client: return None
+    try: return client.open(SPREADSHEET_NAME)
     except: return None
 
-@st.cache_data(ttl=5)
+def get_worksheet(sheet_name):
+    sh = get_spreadsheet()
+    if not sh: return None
+    try: return sh.worksheet(sheet_name)
+    except: return None
+
+@st.cache_data(ttl=60)
 def load_data(sheet_name):
-    ws = get_worksheet(sheet_name)
-    if ws is None: return pd.DataFrame()
     try:
+        ws = get_worksheet(sheet_name)
+        if ws is None: return pd.DataFrame()
         data = ws.get_all_records()
         df = pd.DataFrame(data)
         for col in ['sku', 'name', 'category', 'series', 'spec', 'color', 'note', 'price']:
@@ -61,6 +69,7 @@ def load_data(sheet_name):
 def clear_cache():
     load_data.clear()
     load_product_prices.clear()
+    get_spreadsheet.clear()
 
 # ==========================================
 # 3. 核心功能函式
@@ -89,7 +98,7 @@ def ensure_price_column():
     except:
         pass
 
-@st.cache_data(ttl=10)
+@st.cache_data(ttl=60)
 def load_product_prices():
     ws = get_worksheet("Products")
     if not ws:
@@ -254,11 +263,10 @@ def get_stock_overview():
 def ensure_order_sheets():
     if st.session_state.get('_order_sheets_ok'):
         return
-    client = get_client()
-    if not client:
+    sh = get_spreadsheet()
+    if not sh:
         return
     try:
-        sh = client.open(SPREADSHEET_NAME)
         existing = [ws.title for ws in sh.worksheets()]
         if "Orders" not in existing:
             ws = sh.add_worksheet(title="Orders", rows=1000, cols=15)
@@ -394,11 +402,10 @@ def delete_order(order_no):
 def ensure_members_sheet():
     if st.session_state.get('_members_sheet_ok'):
         return
-    client = get_client()
-    if not client:
+    sh = get_spreadsheet()
+    if not sh:
         return
     try:
-        sh = client.open(SPREADSHEET_NAME)
         existing = [ws.title for ws in sh.worksheets()]
         if "Members" not in existing:
             ws = sh.add_worksheet(title="Members", rows=2000, cols=8)
