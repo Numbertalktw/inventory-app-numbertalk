@@ -17,9 +17,11 @@ SERIES = ["原料", "半成品", "成品", "包材", "生命數字能量項鍊",
 KEYERS = ["Wen", "千畇", "James", "Imeng", "小幫手"]
 SHIPPING_METHODS = ["郵局", "i郵箱", "全家", "7-11", "自取"]
 
-ORDER_STATUSES = ["待處理", "處理中", "已出貨", "已完成", "已取消"]
+ORDER_STATUSES = ["已成立", "未付款/未出貨", "已付款/未出貨", "未付款/已出貨", "已完成", "已取消"]
 ORDER_STATUS_COLORS = {
-    "待處理": "🟡", "處理中": "🔵", "已出貨": "🟠", "已完成": "🟢", "已取消": "🔴"
+    "已成立": "🟡", "未付款/未出貨": "🔴", "已付款/未出貨": "🟠",
+    "未付款/已出貨": "🔵", "已完成": "🟢", "已取消": "⚫",
+    "待處理": "🟡", "處理中": "🔵", "已出貨": "🟠"
 }
 
 PREFIX_MAP = {
@@ -299,7 +301,7 @@ def create_order(order_no, order_date, customer_name, customer_phone,
         total = items_total - float(discount) + float(shipping_fee)
         ws_orders.append_row([
             order_no, str(order_date), customer_name, customer_phone,
-            customer_email, shipping_address, "待處理", float(total),
+            customer_email, shipping_address, "已成立", float(total),
             note, created_by, str(datetime.now()),
             float(discount), float(shipping_fee), float(items_total)
         ])
@@ -361,7 +363,7 @@ def update_order_status(order_no, new_status):
     except Exception:
         return False
 
-def ship_order(order_no, keyer, ship_method="", ship_no=""):
+def ship_order(order_no, keyer, ship_method="", ship_no="", target_status="未付款/已出貨"):
     items = load_order_items(order_no)
     if items.empty:
         return False, "找不到訂單品項"
@@ -374,7 +376,7 @@ def ship_order(order_no, keyer, ship_method="", ship_no=""):
         )
         if not ok:
             return False, f"品項 {item['sku']} 出貨失敗"
-    if update_order_status(order_no, "已出貨"):
+    if update_order_status(order_no, target_status):
         return True, "✅ 出貨完成，庫存已扣除"
     return False, "出貨紀錄已建立但狀態更新失敗"
 
@@ -658,21 +660,26 @@ elif page == "🛒 訂單管理":
         member_names = ["-- 手動輸入 --"] + members_df['name'].astype(str).tolist() if not members_df.empty else ["-- 手動輸入 --"]
         sel_member = st.selectbox("📋 從會員名單帶入", member_names, key="o_member_sel")
 
-        if sel_member != "-- 手動輸入 --":
-            m = find_member_by_name(sel_member)
-            def_name = str(m['name']) if m is not None else ""
-            def_phone = str(m['phone']) if m is not None else ""
-            def_email = str(m['email']) if m is not None else ""
-            def_addr = str(m['address']) if m is not None else ""
-        else:
-            def_name, def_phone, def_email, def_addr = "", "", "", ""
+        prev_sel = st.session_state.get('_prev_member_sel', "-- 手動輸入 --")
+        if sel_member != prev_sel:
+            st.session_state['_prev_member_sel'] = sel_member
+            if sel_member != "-- 手動輸入 --":
+                m = find_member_by_name(sel_member)
+                if m is not None:
+                    st.session_state["o_cname"] = str(m['name'])
+                    st.session_state["o_cphone"] = str(m['phone'])
+                    st.session_state["o_cemail"] = str(m['email'])
+                    st.session_state["o_caddr"] = str(m['address'])
+            else:
+                for k in ["o_cname", "o_cphone", "o_cemail", "o_caddr"]:
+                    st.session_state[k] = ""
 
         cc1, cc2 = st.columns(2)
-        cust_name = cc1.text_input("客戶名稱 *必填", value=def_name, key="o_cname")
-        cust_phone = cc2.text_input("聯絡電話", value=def_phone, key="o_cphone")
+        cust_name = cc1.text_input("客戶名稱 *必填", key="o_cname")
+        cust_phone = cc2.text_input("聯絡電話", key="o_cphone")
         cc3, cc4 = st.columns(2)
-        cust_email = cc3.text_input("Email", value=def_email, key="o_cemail")
-        ship_addr = cc4.text_input("寄送地址", value=def_addr, key="o_caddr")
+        cust_email = cc3.text_input("Email", key="o_cemail")
+        ship_addr = cc4.text_input("寄送地址", key="o_caddr")
         o_note = st.text_input("訂單備註", key="o_note")
         o_user = st.selectbox("建立人", ["James", "Imeng", "小幫手"], key="o_user")
 
@@ -750,82 +757,106 @@ elif page == "🛒 訂單管理":
         if df_orders.empty:
             st.info("目前沒有任何訂單")
         else:
-            fc1, fc2 = st.columns(2)
-            status_filter = fc1.multiselect("篩選狀態", ORDER_STATUSES, default=["待處理", "處理中"])
-            search_q = fc2.text_input("搜尋 (訂單號/客戶名)", key="o_search")
+            search_q = st.text_input("🔍 搜尋 (訂單號/客戶名)", key="o_search")
+            sub_pending, sub_done = st.tabs(["📋 未完成", "✅ 已完成"])
 
-            filtered = df_orders.copy()
-            if status_filter:
-                filtered = filtered[filtered['status'].isin(status_filter)]
-            if search_q:
-                mask = (
-                    filtered['order_no'].astype(str).str.contains(search_q, case=False, na=False) |
-                    filtered['customer_name'].astype(str).str.contains(search_q, case=False, na=False)
-                )
-                filtered = filtered[mask]
-
-            filtered = filtered.sort_index(ascending=False)
-            st.markdown(f"共 **{len(filtered)}** 筆訂單")
-
-            for _, row in filtered.iterrows():
-                ono = str(row.get('order_no', ''))
-                status = str(row.get('status', ''))
-                icon = ORDER_STATUS_COLORS.get(status, "⚪")
-                with st.expander(f"{icon} {ono} — {row.get('customer_name', '')} | ${row.get('total_amount', 0):,.0f} | {status}"):
-                    dc1, dc2, dc3 = st.columns(3)
-                    dc1.write(f"📅 日期: {row.get('order_date', '')}")
-                    dc2.write(f"📞 電話: {row.get('customer_phone', '')}")
-                    dc3.write(f"📧 Email: {row.get('customer_email', '')}")
-                    st.write(f"📍 地址: {row.get('shipping_address', '')}")
-                    r_disc = float(row.get('discount', 0))
-                    r_ship = float(row.get('shipping_fee', 0))
-                    r_items = float(row.get('items_total', 0))
-                    if r_disc > 0 or r_ship > 0:
-                        st.write(f"💰 商品 ${r_items:,.0f} − 折扣 ${r_disc:,.0f} + 運費 ${r_ship:,.0f} = **${row.get('total_amount', 0):,.0f}**")
-                    if row.get('note', ''):
-                        st.write(f"📝 備註: {row.get('note', '')}")
-
-                    items = load_order_items(ono)
-                    if not items.empty:
-                        st.dataframe(
-                            items[['sku', 'product_name', 'qty', 'unit_price', 'subtotal', 'warehouse']].rename(
-                                columns={'sku': '貨號', 'product_name': '品名', 'qty': '數量',
-                                         'unit_price': '單價', 'subtotal': '小計', 'warehouse': '倉庫'}
-                            ),
-                            use_container_width=True, hide_index=True
-                        )
-
-                    bc1, bc2, bc3, bc4, bc5 = st.columns(5)
-                    if status == "待處理":
-                        if bc1.button("🔵 處理中", key=f"os_proc_{ono}"):
-                            update_order_status(ono, "處理中")
-                            st.rerun()
-                        if bc4.button("🔴 取消", key=f"os_cancel_{ono}"):
-                            update_order_status(ono, "已取消")
-                            st.rerun()
-                    if status == "處理中":
-                        ship_user = bc1.selectbox("出貨經手人", ["James", "Imeng", "小幫手"], key=f"os_ship_u_{ono}")
-                        s_method = bc2.selectbox("寄送方式", SHIPPING_METHODS, key=f"os_ship_m_{ono}")
-                        s_no = bc3.text_input("配送號碼", key=f"os_ship_n_{ono}")
-                        if bc4.button("🚚 確認出貨", key=f"os_ship_{ono}"):
-                            ok, msg = ship_order(ono, ship_user, s_method, s_no)
-                            if ok:
-                                st.success(msg)
-                                time.sleep(1)
+            def render_order_list(df_filtered, kp):
+                if df_filtered.empty:
+                    st.info("沒有符合的訂單")
+                    return
+                st.markdown(f"共 **{len(df_filtered)}** 筆")
+                for _, row in df_filtered.iterrows():
+                    ono = str(row.get('order_no', ''))
+                    status = str(row.get('status', ''))
+                    icon = ORDER_STATUS_COLORS.get(status, "⚪")
+                    with st.expander(f"{icon} {ono} — {row.get('customer_name', '')} | ${row.get('total_amount', 0):,.0f} | {status}"):
+                        dc1, dc2, dc3 = st.columns(3)
+                        dc1.write(f"📅 日期: {row.get('order_date', '')}")
+                        dc2.write(f"📞 電話: {row.get('customer_phone', '')}")
+                        dc3.write(f"📧 Email: {row.get('customer_email', '')}")
+                        st.write(f"📍 地址: {row.get('shipping_address', '')}")
+                        r_disc = float(row.get('discount', 0))
+                        r_ship = float(row.get('shipping_fee', 0))
+                        r_items = float(row.get('items_total', 0))
+                        if r_disc > 0 or r_ship > 0:
+                            st.write(f"💰 商品 ${r_items:,.0f} − 折扣 ${r_disc:,.0f} + 運費 ${r_ship:,.0f} = **${row.get('total_amount', 0):,.0f}**")
+                        if row.get('note', ''):
+                            st.write(f"📝 備註: {row.get('note', '')}")
+                        items = load_order_items(ono)
+                        if not items.empty:
+                            st.dataframe(
+                                items[['sku', 'product_name', 'qty', 'unit_price', 'subtotal', 'warehouse']].rename(
+                                    columns={'sku': '貨號', 'product_name': '品名', 'qty': '數量',
+                                             'unit_price': '單價', 'subtotal': '小計', 'warehouse': '倉庫'}
+                                ),
+                                use_container_width=True, hide_index=True
+                            )
+                        if status in ["已成立", "待處理"]:
+                            ac1, ac2, ac3 = st.columns(3)
+                            if ac1.button("📋 確認訂單", key=f"{kp}_confirm_{ono}"):
+                                update_order_status(ono, "未付款/未出貨")
                                 st.rerun()
-                            else:
-                                st.error(msg)
-                        if bc5.button("🔴 取消", key=f"os_cancel2_{ono}"):
-                            update_order_status(ono, "已取消")
-                            st.rerun()
-                    if status == "已出貨":
-                        if bc1.button("🟢 完成", key=f"os_done_{ono}"):
-                            update_order_status(ono, "已完成")
-                            st.rerun()
-                    if status in ["待處理", "已取消"]:
-                        if bc5.button("🗑️ 刪除", key=f"os_del_{ono}"):
-                            delete_order(ono)
-                            st.rerun()
+                            if ac2.button("🔴 取消", key=f"{kp}_cancel_{ono}"):
+                                update_order_status(ono, "已取消")
+                                st.rerun()
+                            if ac3.button("🗑️ 刪除", key=f"{kp}_del_{ono}"):
+                                delete_order(ono)
+                                st.rerun()
+                        elif status in ["未付款/未出貨", "處理中"]:
+                            ac1, ac2 = st.columns(2)
+                            if ac1.button("💰 標記已付款", key=f"{kp}_paid_{ono}"):
+                                update_order_status(ono, "已付款/未出貨")
+                                st.rerun()
+                            if ac2.button("🔴 取消訂單", key=f"{kp}_cancel_{ono}"):
+                                update_order_status(ono, "已取消")
+                                st.rerun()
+                            st.markdown("---")
+                            sc1, sc2, sc3 = st.columns(3)
+                            ship_user = sc1.selectbox("出貨經手人", KEYERS, key=f"{kp}_su_{ono}")
+                            s_method = sc2.selectbox("寄送方式", SHIPPING_METHODS, key=f"{kp}_sm_{ono}")
+                            s_no = sc3.text_input("配送號碼", key=f"{kp}_sn_{ono}")
+                            if st.button("🚚 出貨", key=f"{kp}_ship_{ono}"):
+                                ok, msg = ship_order(ono, ship_user, s_method, s_no, "未付款/已出貨")
+                                if ok:
+                                    st.success(msg); time.sleep(1); st.rerun()
+                                else:
+                                    st.error(msg)
+                        elif status == "已付款/未出貨":
+                            sc1, sc2, sc3 = st.columns(3)
+                            ship_user = sc1.selectbox("出貨經手人", KEYERS, key=f"{kp}_su_{ono}")
+                            s_method = sc2.selectbox("寄送方式", SHIPPING_METHODS, key=f"{kp}_sm_{ono}")
+                            s_no = sc3.text_input("配送號碼", key=f"{kp}_sn_{ono}")
+                            if st.button("🚚 出貨 → 完成", key=f"{kp}_ship_{ono}", type="primary"):
+                                ok, msg = ship_order(ono, ship_user, s_method, s_no, "已完成")
+                                if ok:
+                                    st.success(msg); time.sleep(1); st.rerun()
+                                else:
+                                    st.error(msg)
+                        elif status in ["未付款/已出貨", "已出貨"]:
+                            if st.button("💰 確認收款 → 完成", key=f"{kp}_complete_{ono}", type="primary"):
+                                update_order_status(ono, "已完成")
+                                st.rerun()
+                        elif status == "已取消":
+                            if st.button("🗑️ 刪除", key=f"{kp}_del_{ono}"):
+                                delete_order(ono)
+                                st.rerun()
+
+            def apply_search(df, q):
+                if not q:
+                    return df
+                mask = (
+                    df['order_no'].astype(str).str.contains(q, case=False, na=False) |
+                    df['customer_name'].astype(str).str.contains(q, case=False, na=False)
+                )
+                return df[mask]
+
+            with sub_pending:
+                pending = df_orders[~df_orders['status'].isin(["已完成", "已取消"])]
+                render_order_list(apply_search(pending, search_q).sort_index(ascending=False), "p")
+
+            with sub_done:
+                done = df_orders[df_orders['status'].isin(["已完成", "已取消"])]
+                render_order_list(apply_search(done, search_q).sort_index(ascending=False), "d")
 
     with tab_detail:
         df_orders = load_orders()
