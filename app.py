@@ -17,11 +17,11 @@ SERIES = ["原料", "半成品", "成品", "包材", "生命數字能量項鍊",
 KEYERS = ["Wen", "千畇", "James", "Imeng", "小幫手"]
 SHIPPING_METHODS = ["郵局", "i郵箱", "全家", "7-11", "自取"]
 
-ORDER_STATUSES = ["已成立", "未付款/未出貨", "已付款/未出貨", "未付款/已出貨", "已完成", "已取消"]
+ORDER_STATUSES = ["已確認", "未付款/未出貨", "已付款/未出貨", "未付款/已出貨", "已完成"]
 ORDER_STATUS_COLORS = {
-    "已成立": "🟡", "未付款/未出貨": "🔴", "已付款/未出貨": "🟠",
-    "未付款/已出貨": "🔵", "已完成": "🟢", "已取消": "⚫",
-    "待處理": "🟡", "處理中": "🔵", "已出貨": "🟠"
+    "已確認": "🟡", "未付款/未出貨": "🔴", "已付款/未出貨": "🟠",
+    "未付款/已出貨": "🔵", "已完成": "🟢",
+    "已成立": "🟡", "待處理": "🟡", "處理中": "🔵", "已出貨": "🟠", "已取消": "⚫"
 }
 
 PREFIX_MAP = {
@@ -329,7 +329,7 @@ def create_order(order_no, order_date, customer_name, customer_phone,
         total = items_total - float(discount) + float(shipping_fee)
         ws_orders.append_row([
             order_no, str(order_date), customer_name, customer_phone,
-            customer_email, shipping_address, "已成立", float(total),
+            customer_email, shipping_address, "已確認", float(total),
             note, created_by, str(datetime.now()),
             float(discount), float(shipping_fee), float(items_total)
         ])
@@ -827,16 +827,8 @@ elif page == "🛒 訂單管理":
                             )
 
                         # === 下拉式狀態選單 ===
-                        trans_map = {
-                            "已成立": ["未付款/未出貨", "已取消"],
-                            "待處理": ["未付款/未出貨", "已取消"],
-                            "未付款/未出貨": ["已付款/未出貨", "未付款/已出貨", "已取消"],
-                            "處理中": ["已付款/未出貨", "未付款/已出貨", "已取消"],
-                            "已付款/未出貨": ["已完成", "已取消"],
-                            "未付款/已出貨": ["已完成"],
-                            "已出貨": ["已完成"],
-                        }
-                        options = trans_map.get(status, [])
+                        all_statuses = ["已確認", "未付款/未出貨", "已付款/未出貨", "未付款/已出貨", "已完成"]
+                        options = [s for s in all_statuses if s != status]
                         if options:
                             st.markdown("---")
                             new_st = st.selectbox("變更狀態", options, key=f"{kp}_nst_{ono}")
@@ -866,19 +858,12 @@ elif page == "🛒 訂單管理":
                                         time.sleep(1)
                                         st.rerun()
 
-                            if status in ["已成立", "待處理", "已取消"]:
+                            if status in ["已確認", "已成立", "待處理"]:
                                 if ac2.button("刪除", key=f"{kp}_del_{ono}"):
                                     if delete_order(ono):
                                         st.success("訂單已刪除")
                                         time.sleep(1)
                                         st.rerun()
-
-                        elif status == "已取消":
-                            if st.button("刪除訂單", key=f"{kp}_del_{ono}"):
-                                if delete_order(ono):
-                                    st.success("訂單已刪除")
-                                    time.sleep(1)
-                                    st.rerun()
 
             def apply_search(df, q):
                 if not q:
@@ -890,11 +875,11 @@ elif page == "🛒 訂單管理":
                 return df[mask]
 
             with sub_pending:
-                pending = df_orders[~df_orders['status'].isin(["已完成", "已取消"])]
+                pending = df_orders[df_orders['status'] != "已完成"]
                 render_order_list(apply_search(pending, search_q).sort_index(ascending=False), "p")
 
             with sub_done:
-                done = df_orders[df_orders['status'].isin(["已完成", "已取消"])]
+                done = df_orders[df_orders['status'] == "已完成"]
                 render_order_list(apply_search(done, search_q).sort_index(ascending=False), "d")
 
     with tab_detail:
