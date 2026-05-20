@@ -395,6 +395,28 @@ def update_order_status(order_no, new_status):
         st.error(f"狀態更新失敗: {e}")
         return False
 
+def update_order_note(order_no, new_note):
+    """更新訂單備註"""
+    ws = get_worksheet_for_write("Orders")
+    if not ws:
+        st.error("無法連線到 Orders 工作表")
+        return False
+    try:
+        all_vals = ws.get_all_values()
+        header = all_vals[0]
+        no_idx = header.index("order_no")
+        note_idx = header.index("note")
+        for i, row in enumerate(all_vals[1:], 2):
+            if str(row[no_idx]) == str(order_no):
+                ws.update_cell(i, note_idx + 1, new_note)
+                clear_cache()
+                return True
+        st.error(f"找不到訂單 {order_no}")
+        return False
+    except Exception as e:
+        st.error(f"備註更新失敗: {e}")
+        return False
+
 def ship_order(order_no, keyer, ship_method="", ship_no="", target_status="未付款/已出貨"):
     items = load_order_items(order_no)
     if items.empty:
@@ -814,8 +836,6 @@ elif page == "🛒 訂單管理":
                         r_items = float(row.get('items_total', 0))
                         if r_disc > 0 or r_ship > 0:
                             st.write(f"商品 ${r_items:,.0f} - 折扣 ${r_disc:,.0f} + 運費 ${r_ship:,.0f} = **${row.get('total_amount', 0):,.0f}**")
-                        if row.get('note', ''):
-                            st.write(f"備註: {row.get('note', '')}")
                         items = load_order_items(ono)
                         if not items.empty:
                             st.dataframe(
@@ -825,6 +845,19 @@ elif page == "🛒 訂單管理":
                                 ),
                                 use_container_width=True, hide_index=True
                             )
+
+                        # === 備註編輯 ===
+                        cur_note = str(row.get('note', ''))
+                        nc1, nc2 = st.columns([5, 1])
+                        edit_note = nc1.text_input("📝 備註", value=cur_note, key=f"{kp}_note_{ono}")
+                        if nc2.button("💾", key=f"{kp}_note_save_{ono}"):
+                            if edit_note != cur_note:
+                                if update_order_note(ono, edit_note):
+                                    st.success("備註已更新")
+                                    time.sleep(1)
+                                    st.rerun()
+                            else:
+                                st.info("備註沒有變更")
 
                         # === 下拉式狀態選單 ===
                         all_statuses = ["已確認", "未付款/未出貨", "已付款/未出貨", "未付款/已出貨", "已完成"]
@@ -911,8 +944,18 @@ elif page == "🛒 訂單管理":
                     dc3.metric("運費", f"${d_ship:,.0f}")
                 st.write(f"電話: {row.get('customer_phone', '')} | Email: {row.get('customer_email', '')}")
                 st.write(f"地址: {row.get('shipping_address', '')}")
-                if row.get('note', ''):
-                    st.write(f"備註: {row.get('note', '')}")
+                # === 備註編輯 ===
+                cur_note_d = str(row.get('note', ''))
+                nd1, nd2 = st.columns([5, 1])
+                edit_note_d = nd1.text_input("📝 備註", value=cur_note_d, key="detail_note")
+                if nd2.button("💾 儲存備註", key="detail_note_save"):
+                    if edit_note_d != cur_note_d:
+                        if update_order_note(sel_ono, edit_note_d):
+                            st.success("備註已更新")
+                            time.sleep(1)
+                            st.rerun()
+                    else:
+                        st.info("備註沒有變更")
                 st.markdown("---")
                 items = load_order_items(sel_ono)
                 if not items.empty:
