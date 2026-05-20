@@ -915,32 +915,85 @@ elif page == "🛒 訂單管理":
                             st.write(f"商品 ${r_items:,.0f} - 折扣 ${r_disc:,.0f} + 運費 ${r_ship:,.0f} = **${row.get('total_amount', 0):,.0f}**")
                         items = load_order_items(ono)
                         if not items.empty:
-                            st.dataframe(
-                                items[['sku', 'product_name', 'qty', 'unit_price', 'subtotal', 'warehouse']].rename(
-                                    columns={'sku': '貨號', 'product_name': '品名', 'qty': '數量',
-                                             'unit_price': '單價', 'subtotal': '小計', 'warehouse': '倉庫'}
-                                ),
-                                use_container_width=True, hide_index=True
-                            )
+                            st.markdown("##### 訂單品項")
+                            for it_idx, it_row in items.iterrows():
+                                ic1, ic2, ic3, ic4, ic5 = st.columns([3, 1, 1, 1, 0.5])
+                                ic1.write(f"**{it_row['product_name']}** ({it_row['sku']})")
+                                ic2.write(f"{it_row['warehouse']}")
+                                ic3.write(f"x{it_row['qty']:.0f}")
+                                ic4.write(f"${it_row['subtotal']:,.0f}")
+                                if ic5.button("🗑️", key=f"{kp}_irm_{ono}_{it_idx}"):
+                                    if delete_order_item(ono, str(it_row['sku']), str(it_row['warehouse'])):
+                                        recalc_order_total(ono, r_disc, r_ship)
+                                        st.success(f"已刪除 {it_row['product_name']}")
+                                        time.sleep(1)
+                                        st.rerun()
 
-                        # === 備註編輯 ===
-                        cur_note = str(row.get('note', ''))
-                        nc1, nc2 = st.columns([5, 1])
-                        edit_note = nc1.text_input("📝 備註", value=cur_note, key=f"{kp}_note_{ono}")
-                        if nc2.button("💾", key=f"{kp}_note_save_{ono}"):
-                            if edit_note != cur_note:
-                                if update_order_note(ono, edit_note):
-                                    st.success("備註已更新")
+                        # === 新增品項 ===
+                        st.markdown("---")
+                        prods = get_formatted_product_df()
+                        if not prods.empty:
+                            st.markdown("##### ➕ 新增品項")
+                            ai1, ai2, ai3, ai4 = st.columns([3, 1, 1, 1])
+                            ai_sel = ai1.selectbox("商品", prods['label'], key=f"{kp}_ai_sel_{ono}")
+                            ai_wh = ai2.selectbox("倉庫", WAREHOUSES, key=f"{kp}_ai_wh_{ono}")
+                            ai_qty = ai3.number_input("數量", min_value=1.0, value=1.0, key=f"{kp}_ai_qty_{ono}")
+                            ai_sku = ai_sel.split(" | ")[0]
+                            ai_prod = prods[prods['sku'].astype(str) == ai_sku]
+                            try:
+                                ai_dp = float(ai_prod.iloc[0]['price']) if not ai_prod.empty else 0.0
+                            except (ValueError, TypeError):
+                                ai_dp = 0.0
+                            ai_price = ai4.number_input("單價", min_value=0.0, value=ai_dp, step=10.0,
+                                                         key=f"{kp}_ai_pr_{ono}_{ai_sku}")
+                            if st.button("➕ 加入此品項", key=f"{kp}_ai_add_{ono}"):
+                                ai_pname = ai_sel.split(" | ")[1] if " | " in ai_sel else ai_sel
+                                if add_order_item(ono, ai_sku, ai_pname, ai_qty, ai_price, ai_wh):
+                                    recalc_order_total(ono, r_disc, r_ship)
+                                    st.success(f"已新增 {ai_pname}")
                                     time.sleep(1)
                                     st.rerun()
-                            else:
-                                st.info("備註沒有變更")
+
+                        # === 修改客戶 / 金額 ===
+                        st.markdown("---")
+                        edit_info, edit_price = st.tabs(["✏️ 修改客戶資訊", "💰 修改金額"])
+                        with edit_info:
+                            with st.form(f"edit_info_{kp}_{ono}"):
+                                ei1, ei2 = st.columns(2)
+                                e_name = ei1.text_input("客戶名稱", value=str(row.get('customer_name', '')))
+                                e_phone = ei2.text_input("電話", value=str(row.get('customer_phone', '')))
+                                ei3, ei4 = st.columns(2)
+                                e_email = ei3.text_input("Email", value=str(row.get('customer_email', '')))
+                                e_addr = ei4.text_input("地址", value=str(row.get('shipping_address', '')))
+                                e_note = st.text_input("備註", value=str(row.get('note', '')))
+                                if st.form_submit_button("💾 儲存客戶資訊", use_container_width=True):
+                                    if update_order_fields(ono, {
+                                        'customer_name': e_name, 'customer_phone': e_phone,
+                                        'customer_email': e_email, 'shipping_address': e_addr,
+                                        'note': e_note
+                                    }):
+                                        st.success("客戶資訊已更新")
+                                        time.sleep(1)
+                                        st.rerun()
+                        with edit_price:
+                            with st.form(f"edit_price_{kp}_{ono}"):
+                                ep1, ep2 = st.columns(2)
+                                e_disc = ep1.number_input("優惠折扣", min_value=0.0, value=float(r_disc), step=10.0)
+                                e_shipf = ep2.number_input("運費", min_value=0.0, value=float(r_ship), step=10.0)
+                                cur_it = float(items['subtotal'].sum()) if not items.empty else 0.0
+                                new_tot = cur_it - e_disc + e_shipf
+                                st.markdown(f"商品 ${cur_it:,.0f} - 折扣 ${e_disc:,.0f} + 運費 ${e_shipf:,.0f} = **${new_tot:,.0f}**")
+                                if st.form_submit_button("💾 儲存金額", use_container_width=True):
+                                    if recalc_order_total(ono, e_disc, e_shipf):
+                                        st.success("金額已更新")
+                                        time.sleep(1)
+                                        st.rerun()
 
                         # === 下拉式狀態選單 ===
+                        st.markdown("---")
                         all_statuses = ["已確認", "未付款/未出貨", "已付款/未出貨", "未付款/已出貨", "已完成"]
                         options = [s for s in all_statuses if s != status]
                         if options:
-                            st.markdown("---")
                             new_st = st.selectbox("變更狀態", options, key=f"{kp}_nst_{ono}")
 
                             need_ship = (status in ["未付款/未出貨", "處理中", "已付款/未出貨"]
