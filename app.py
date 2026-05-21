@@ -4,6 +4,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import date, datetime
 import time
+import re
 
 # ==========================================
 # 1. 系統基礎設定
@@ -599,6 +600,7 @@ def find_member_by_name(name):
 
 def save_member(name, phone, email, address, note="", birthday="", birth_time=""):
     ensure_members_sheet()
+    birthday = normalize_birthday(birthday)  # 統一為 YYYY/MM/DD
     ws = get_worksheet_for_write("Members")
     if not ws:
         return False
@@ -661,6 +663,165 @@ def delete_member(name):
         return False
     except Exception:
         return False
+
+
+def normalize_birthday(s):
+    """將各種日期輸入正規化為 YYYY/MM/DD (例: 2000/01/05)。
+    支援: 2000-1-5 / 2000.1.5 / 2000/01/05 / 20000105。
+    無法解析(如「不詳」、農曆描述)則原樣返回。"""
+    s = str(s or '').strip()
+    if not s:
+        return ''
+    # 8 碼純數字: 20000105
+    if re.fullmatch(r'\d{8}', s):
+        return f"{s[0:4]}/{int(s[4:6]):02d}/{int(s[6:8]):02d}"
+    # 以 - / . 空格 分隔的年月日
+    digits = re.findall(r'\d+', s)
+    if len(digits) >= 3 and len(digits[0]) == 4:
+        try:
+            y, m, d = int(digits[0]), int(digits[1]), int(digits[2])
+            if 1 <= m <= 12 and 1 <= d <= 31:
+                return f"{y:04d}/{m:02d}/{d:02d}"
+        except ValueError:
+            pass
+    return s
+
+
+# ==========================================
+# 3.6b 會員關係鏈核心功能
+# ==========================================
+# 在會員之間建立關係 (配偶/父母/子女/朋友等),支援雙向查詢。
+# 儲存語意: "member_a 的 [relation_type] 是 member_b"
+RELATION_TYPES = ["配偶", "伴侶", "父母", "子女", "兄弟姊妹",
+                  "祖父母", "孫子女", "親戚", "朋友", "同事", "其他"]
+RELATION_REVERSE = {
+    "配偶": "配偶", "伴侶": "伴侶", "父母": "子女", "子女": "父母",
+    "兄弟姊妹": "兄弟姊妹", "祖父母": "孫子女", "孫子女": "祖父母",
+    "親戚": "親戚", "朋友": "朋友", "同事": "同事", "其他": "其他",
+}
+RELATION_COLUMNS = ["relation_id", "member_a", "relation_type",
+                    "member_b", "note", "created_at"]
+
+
+def ensure_relations_sheet():
+    if st.session_state.get('_relations_sheet_ok'):
+        return
+    sh = get_spreadsheet()
+    if not sh:
+        return
+    try:
+        existing = [ws.title for ws in sh.worksheets()]
+        if "MemberRelations" not in existing:
+            ws = sh.add_worksheet(title="MemberRelations", rows=2000,
+                                  cols=len(RELATION_COLUMNS))
+            ws.append_row(RELATION_COLUMNS)
+        st.session_state['_relations_sheet_ok'] = True
+    except Exception:
+        pass
+
+
+def load_relations():
+    ensure_relations_sheet()
+    df = load_data("MemberRelations")
+    if df.empty:
+        return pd.DataFrame(columns=RELATION_COLUMNS)
+    for col in RELATION_COLUMNS:
+        if col not in df.columns:
+            df[col] = ""
+    return df
+
+
+def add_relation(member_a, relation_type, member_b, note=""):
+    """新增關係: member_a 的 relation_type 是 member_b。"""
+    if not member_a or not member_b or member_a == member_b:
+        return False, "請選擇兩位不同的會員"
+    ensure_relations_sheet()
+    ws = get_worksheet_for_write("MemberRelations")
+    if not ws:
+        return False, "無法連線到 MemberRelations 工作表"
+    try:
+        # 避免重複建立同一組關係
+        existing = load_relations()
+        if not existing.empty:
+            dup = existing[
+                (existing['member_a'].astype(str) == str(member_a)) &
+                (existing['member_b'].astype(str) == str(member_b)) &
+                (existing['relation_type'].astype(str) == str(relation_type))
+            ]
+            if not dup.empty:
+                return False, "此關係已存在"
+        rid = f"R-{int(time.time() * 1000) % 10**10}"
+        ws.append_row([rid, member_a, relation_type, member_b, note,
+                       str(datetime.now())])
+        clear_cache()
+        return True, f"已建立關係: {member_a} 的 {relation_type} 是 {member_b}"
+    except Exception as e:
+        return False, f"建立失敗: {e}"
+
+
+def delete_relation(relation_id):
+    ws = get_worksheet_for_write("MemberRelations")
+    if not ws:
+        return False
+    try:
+        all_vals = ws.get_all_values()
+        header = all_vals[0]
+        rid_idx = header.index("relation_id")
+        for i, row in enumerate(all_vals[1:], 2):
+            if len(row) > rid_idx and str(row[rid_idx]) == str(relation_id):
+                ws.delete_rows(i)
+                clear_cache()
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def get_member_relations(name):
+    """回傳該會員的所有關係(含反向推導)。
+    每筆: {target, relation, relation_id, note, reverse}
+    """
+    df = load_relations()
+    if df.empty:
+        return []
+    results = []
+    for _, r in df.iterrows():
+        a = str(r.get('member_a', ''))
+        b = str(r.get('member_b', ''))
+        rt = str(r.get('relation_type', ''))
+        rid = str(r.get('relation_id', ''))
+        note = str(r.get('note', ''))
+        if a == name:
+            # name 的 rt 是 b
+            results.append({'target': b, 'relation': rt, 'relation_id': rid,
+                            'note': note, 'reverse': False})
+        elif b == name:
+            # b 是 name 的反向關係
+            rev = RELATION_REVERSE.get(rt, rt)
+            results.append({'target': a, 'relation': rev, 'relation_id': rid,
+                            'note': note, 'reverse': True})
+    return results
+
+
+def rename_member_in_relations(old_name, new_name):
+    """會員改名時同步更新關係鏈中的名稱(選用)。"""
+    ws = get_worksheet_for_write("MemberRelations")
+    if not ws:
+        return
+    try:
+        all_vals = ws.get_all_values()
+        header = all_vals[0]
+        a_idx = header.index("member_a")
+        b_idx = header.index("member_b")
+        for i, row in enumerate(all_vals[1:], 2):
+            if len(row) > a_idx and str(row[a_idx]) == str(old_name):
+                ws.update_cell(i, a_idx + 1, new_name)
+            if len(row) > b_idx and str(row[b_idx]) == str(old_name):
+                ws.update_cell(i, b_idx + 1, new_name)
+        clear_cache()
+    except Exception:
+        pass
+
 
 # ==========================================
 # 3.7 工資計算核心功能 (與 wage-app 整合)
@@ -1951,7 +2112,9 @@ elif page == "🛒 訂單管理":
 # --- 👥 會員管理 ---
 elif page == "👥 會員管理":
     st.subheader("👥 會員名單管理")
-    tab_m_list, tab_m_add = st.tabs(["📋 會員列表", "手動新增會員"])
+    ensure_relations_sheet()
+    tab_m_list, tab_m_add, tab_m_rel = st.tabs(
+        ["📋 會員列表", "手動新增會員", "🔗 關係鏈"])
 
     with tab_m_list:
         df_members = load_members()
@@ -1992,10 +2155,12 @@ elif page == "👥 會員管理":
                         em_phone = em_c1.text_input("電話", value=str(m_data.get('phone', '')))
                         em_email = em_c2.text_input("Email", value=str(m_data.get('email', '')))
                         em_c3, em_c4 = st.columns(2)
-                        em_birthday = em_c3.text_input("生日 (例: 1990-05-20)",
-                                                       value=str(m_data.get('birthday', '') or ''))
+                        em_birthday = em_c3.text_input("生日 (格式 2000/01/05)",
+                                                       value=str(m_data.get('birthday', '') or ''),
+                                                       placeholder="2000/01/05")
                         em_birthtime = em_c4.text_input("出生時間 (例: 14:30 或 不詳)",
-                                                        value=str(m_data.get('birth_time', '') or ''))
+                                                        value=str(m_data.get('birth_time', '') or ''),
+                                                        placeholder="14:30")
                         em_addr = st.text_input("地址", value=str(m_data.get('address', '')))
                         if st.form_submit_button("儲存修改"):
                             save_member(sel_m, em_phone, em_email, em_addr,
@@ -2016,8 +2181,8 @@ elif page == "👥 會員管理":
             am_phone = am_c1.text_input("電話")
             am_email = am_c2.text_input("Email")
             am_c3, am_c4 = st.columns(2)
-            am_birthday = am_c3.text_input("生日 (例: 1990-05-20)")
-            am_birthtime = am_c4.text_input("出生時間 (例: 14:30 或 不詳)")
+            am_birthday = am_c3.text_input("生日 (格式 2000/01/05)", placeholder="2000/01/05")
+            am_birthtime = am_c4.text_input("出生時間 (例: 14:30 或 不詳)", placeholder="14:30")
             am_addr = st.text_input("地址")
             am_note = st.text_input("備註")
             if st.form_submit_button("新增會員", use_container_width=True):
@@ -2032,6 +2197,77 @@ elif page == "👥 會員管理":
                     st.success(f"會員 '{am_name}' 已儲存")
                     time.sleep(1)
                     st.rerun()
+
+    # === 🔗 關係鏈 ===
+    with tab_m_rel:
+        df_members = load_members()
+        if df_members.empty or len(df_members) < 1:
+            st.info("目前沒有會員。請先新增會員後再建立關係。")
+        else:
+            member_names = df_members['name'].astype(str).tolist()
+
+            # --- 建立新關係 ---
+            st.markdown("##### ➕ 建立關係")
+            st.caption("語意:「A 的 [關係] 是 B」。例如「王小明 的 配偶 是 李美麗」,系統會自動推導反向關係。")
+            with st.form("add_relation_form"):
+                rc1, rc2, rc3 = st.columns([2, 1.2, 2])
+                rel_a = rc1.selectbox("會員 A", member_names, key="rel_a")
+                rel_type = rc2.selectbox("關係", RELATION_TYPES, key="rel_type")
+                rel_b = rc3.selectbox("會員 B", member_names,
+                                      index=min(1, len(member_names) - 1), key="rel_b")
+                rel_note = st.text_input("備註 (選填)", key="rel_note")
+                if st.form_submit_button("建立關係", type="primary"):
+                    ok, msg = add_relation(rel_a, rel_type, rel_b, rel_note)
+                    if ok:
+                        st.success(msg)
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.warning(msg)
+
+            st.markdown("---")
+
+            # --- 檢視某會員的關係網 ---
+            st.markdown("##### 🔍 檢視會員關係")
+            view_member = st.selectbox("選擇會員", member_names, key="rel_view")
+            rels = get_member_relations(view_member)
+            if not rels:
+                st.info(f"「{view_member}」目前沒有建立任何關係。")
+            else:
+                st.markdown(f"**{view_member}** 共有 {len(rels)} 筆關係:")
+                for rel in rels:
+                    rc1, rc2, rc3 = st.columns([4, 2, 1])
+                    arrow = "↩ (反向推導)" if rel['reverse'] else ""
+                    rc1.write(f"**{view_member}** 的 **{rel['relation']}** 是 "
+                              f"**{rel['target']}** {arrow}")
+                    # 顯示對方生日(若有)
+                    tgt = df_members[df_members['name'].astype(str) == rel['target']]
+                    if not tgt.empty:
+                        bd = str(tgt.iloc[0].get('birthday', '') or '')
+                        bt = str(tgt.iloc[0].get('birth_time', '') or '')
+                        info = " / ".join([x for x in [bd, bt] if x])
+                        rc2.caption(f"🎂 {info}" if info else "—")
+                    else:
+                        rc2.caption("(非會員)")
+                    if rc3.button("刪除", key=f"rel_del_{rel['relation_id']}"):
+                        if delete_relation(rel['relation_id']):
+                            st.success("已刪除關係")
+                            time.sleep(0.8)
+                            st.rerun()
+                    if rel['note']:
+                        st.caption(f"　　備註: {rel['note']}")
+
+            # --- 全部關係總表 ---
+            st.markdown("---")
+            with st.expander("📋 所有關係總表"):
+                df_rel = load_relations()
+                if df_rel.empty:
+                    st.caption("尚無任何關係")
+                else:
+                    disp = df_rel[['member_a', 'relation_type', 'member_b', 'note']].rename(
+                        columns={'member_a': '會員 A', 'relation_type': '關係',
+                                 'member_b': '會員 B', 'note': '備註'})
+                    st.dataframe(disp, use_container_width=True, hide_index=True)
 
 # --- 🔨 製造作業 ---
 elif page == "🔨 製造作業":
