@@ -552,6 +552,10 @@ def delete_order(order_no):
 # 3.6 會員名單核心功能
 # ==========================================
 
+# Members 工作表完整欄位 (birthday=生日, birth_time=出生時間,用於生命數字/紫微等命理)
+MEMBER_COLUMNS = ["member_id", "name", "phone", "email", "address",
+                  "birthday", "birth_time", "note", "created_at", "last_order_date"]
+
 def ensure_members_sheet():
     if st.session_state.get('_members_sheet_ok'):
         return
@@ -561,9 +565,16 @@ def ensure_members_sheet():
     try:
         existing = [ws.title for ws in sh.worksheets()]
         if "Members" not in existing:
-            ws = sh.add_worksheet(title="Members", rows=2000, cols=8)
-            ws.append_row(["member_id", "name", "phone", "email", "address",
-                           "note", "created_at", "last_order_date"])
+            ws = sh.add_worksheet(title="Members", rows=2000, cols=len(MEMBER_COLUMNS))
+            ws.append_row(MEMBER_COLUMNS)
+        else:
+            # 既有工作表 → 補上缺少的欄位 (birthday / birth_time),不動既有資料
+            ws = sh.worksheet("Members")
+            header = ws.row_values(1)
+            for col in ["birthday", "birth_time"]:
+                if col not in header:
+                    header.append(col)
+                    ws.update_cell(1, len(header), col)
         st.session_state['_members_sheet_ok'] = True
     except Exception:
         pass
@@ -572,8 +583,11 @@ def load_members():
     ensure_members_sheet()
     df = load_data("Members")
     if df.empty:
-        return pd.DataFrame(columns=["member_id", "name", "phone", "email",
-                                      "address", "note", "created_at", "last_order_date"])
+        return pd.DataFrame(columns=MEMBER_COLUMNS)
+    # 確保新欄位存在 (舊資料可能還沒這兩欄)
+    for col in ["birthday", "birth_time"]:
+        if col not in df.columns:
+            df[col] = ""
     return df
 
 def find_member_by_name(name):
@@ -583,37 +597,49 @@ def find_member_by_name(name):
     match = df[df['name'].astype(str) == str(name)]
     return match.iloc[0] if not match.empty else None
 
-def save_member(name, phone, email, address, note=""):
+def save_member(name, phone, email, address, note="", birthday="", birth_time=""):
     ensure_members_sheet()
     ws = get_worksheet_for_write("Members")
     if not ws:
         return False
     try:
-        existing = load_members()
-        if not existing.empty:
-            match = existing[existing['name'].astype(str) == str(name)]
-            if not match.empty:
-                all_vals = ws.get_all_values()
-                header = all_vals[0]
-                name_idx = header.index("name")
-                for i, row in enumerate(all_vals[1:], 2):
-                    if str(row[name_idx]) == str(name):
-                        ph_idx = header.index("phone")
-                        em_idx = header.index("email")
-                        ad_idx = header.index("address")
-                        dt_idx = header.index("last_order_date")
-                        if phone:
-                            ws.update_cell(i, ph_idx + 1, phone)
-                        if email:
-                            ws.update_cell(i, em_idx + 1, email)
-                        if address:
-                            ws.update_cell(i, ad_idx + 1, address)
-                        ws.update_cell(i, dt_idx + 1, str(date.today()))
-                        clear_cache()
-                        return True
+        all_vals = ws.get_all_values()
+        header = all_vals[0] if all_vals else MEMBER_COLUMNS
+        name_idx = header.index("name") if "name" in header else 1
+
+        # 依欄位名稱安全取得 index 的小工具
+        def col_i(col_name):
+            return header.index(col_name) if col_name in header else -1
+
+        # 1. 既有會員 → 更新欄位
+        for i, row in enumerate(all_vals[1:], 2):
+            if len(row) > name_idx and str(row[name_idx]) == str(name):
+                updates = {
+                    "phone": phone, "email": email, "address": address,
+                    "birthday": birthday, "birth_time": birth_time,
+                    "last_order_date": str(date.today()),
+                }
+                # note 只在有傳入時才覆蓋
+                if note:
+                    updates["note"] = note
+                for col_name, val in updates.items():
+                    ci = col_i(col_name)
+                    # 生日/出生時間/電話等:有值才覆蓋,避免清空既有資料
+                    if ci >= 0 and (val or col_name == "last_order_date"):
+                        ws.update_cell(i, ci + 1, val)
+                clear_cache()
+                return True
+
+        # 2. 新會員 → 依 header 順序組 row
         mid = f"M-{int(time.time()) % 100000:05d}"
-        ws.append_row([mid, name, phone, email, address, note,
-                       str(datetime.now()), str(date.today())])
+        value_map = {
+            "member_id": mid, "name": name, "phone": phone, "email": email,
+            "address": address, "birthday": birthday, "birth_time": birth_time,
+            "note": note, "created_at": str(datetime.now()),
+            "last_order_date": str(date.today()),
+        }
+        new_row = [value_map.get(h, "") for h in header]
+        ws.append_row(new_row)
         clear_cache()
         return True
     except Exception:
@@ -1942,9 +1968,13 @@ elif page == "👥 會員管理":
                 filtered_m = filtered_m[mask]
 
             st.markdown(f"共 **{len(filtered_m)}** 位會員")
+            list_cols = ['name', 'phone', 'email', 'birthday', 'birth_time',
+                         'address', 'last_order_date']
+            list_cols = [c for c in list_cols if c in filtered_m.columns]
             st.dataframe(
-                filtered_m[['name', 'phone', 'email', 'address', 'last_order_date']].rename(
+                filtered_m[list_cols].rename(
                     columns={'name': '姓名', 'phone': '電話', 'email': 'Email',
+                             'birthday': '生日', 'birth_time': '出生時間',
                              'address': '地址', 'last_order_date': '最後訂單日期'}
                 ),
                 use_container_width=True, hide_index=True
@@ -1958,11 +1988,18 @@ elif page == "👥 會員管理":
                 m_data = find_member_by_name(sel_m)
                 if m_data is not None:
                     with st.form("edit_member"):
-                        em_phone = st.text_input("電話", value=str(m_data.get('phone', '')))
-                        em_email = st.text_input("Email", value=str(m_data.get('email', '')))
+                        em_c1, em_c2 = st.columns(2)
+                        em_phone = em_c1.text_input("電話", value=str(m_data.get('phone', '')))
+                        em_email = em_c2.text_input("Email", value=str(m_data.get('email', '')))
+                        em_c3, em_c4 = st.columns(2)
+                        em_birthday = em_c3.text_input("生日 (例: 1990-05-20)",
+                                                       value=str(m_data.get('birthday', '') or ''))
+                        em_birthtime = em_c4.text_input("出生時間 (例: 14:30 或 不詳)",
+                                                        value=str(m_data.get('birth_time', '') or ''))
                         em_addr = st.text_input("地址", value=str(m_data.get('address', '')))
                         if st.form_submit_button("儲存修改"):
-                            save_member(sel_m, em_phone, em_email, em_addr)
+                            save_member(sel_m, em_phone, em_email, em_addr,
+                                        birthday=em_birthday, birth_time=em_birthtime)
                             st.success("會員資料已更新")
                             time.sleep(1)
                             st.rerun()
@@ -1978,6 +2015,9 @@ elif page == "👥 會員管理":
             am_c1, am_c2 = st.columns(2)
             am_phone = am_c1.text_input("電話")
             am_email = am_c2.text_input("Email")
+            am_c3, am_c4 = st.columns(2)
+            am_birthday = am_c3.text_input("生日 (例: 1990-05-20)")
+            am_birthtime = am_c4.text_input("出生時間 (例: 14:30 或 不詳)")
             am_addr = st.text_input("地址")
             am_note = st.text_input("備註")
             if st.form_submit_button("新增會員", use_container_width=True):
@@ -1987,7 +2027,8 @@ elif page == "👥 會員管理":
                     existing = find_member_by_name(am_name)
                     if existing is not None:
                         st.warning(f"會員 '{am_name}' 已存在，將更新資料")
-                    save_member(am_name, am_phone, am_email, am_addr, am_note)
+                    save_member(am_name, am_phone, am_email, am_addr, am_note,
+                                birthday=am_birthday, birth_time=am_birthtime)
                     st.success(f"會員 '{am_name}' 已儲存")
                     time.sleep(1)
                     st.rerun()
