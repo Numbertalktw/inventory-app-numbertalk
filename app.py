@@ -329,11 +329,11 @@ def create_order(order_no, order_date, customer_name, customer_phone,
         items_total = sum(item['subtotal'] for item in items)
         total = items_total - float(discount) + float(shipping_fee)
         ws_orders.append_row([
-            order_no, str(order_date), customer_name, customer_phone,
+            order_no, str(order_date), customer_name, phone_as_text(customer_phone),
             customer_email, shipping_address, "已確認", float(total),
             note, created_by, str(datetime.now()),
             float(discount), float(shipping_fee), float(items_total)
-        ])
+        ], value_input_option='USER_ENTERED')
         for item in items:
             ws_items.append_row([
                 order_no, item['sku'], item['product_name'],
@@ -566,14 +566,23 @@ def ensure_members_sheet():
     try:
         existing = [ws.title for ws in sh.worksheets()]
         if "Members" not in existing:
-            ws = sh.add_worksheet(title="Members", rows=2000, cols=len(MEMBER_COLUMNS))
-            ws.append_row(MEMBER_COLUMNS)
+            ws = sh.add_worksheet(title="Members", rows=2000,
+                                  cols=max(12, len(MEMBER_COLUMNS)))
+            ws.append_row(MEMBER_COLUMNS, value_input_option='USER_ENTERED')
         else:
             # 既有工作表 → 補上缺少的欄位 (birthday / birth_time),不動既有資料
             ws = sh.worksheet("Members")
             header = ws.row_values(1)
-            for col in ["birthday", "birth_time"]:
-                if col not in header:
+            missing = [c for c in ["birthday", "birth_time"] if c not in header]
+            if missing:
+                needed = len(header) + len(missing)
+                # 原始工作表可能只有 8 欄,寫第 9/10 欄會超出格線 → 先擴充欄位
+                try:
+                    if ws.col_count < needed:
+                        ws.add_cols(needed - ws.col_count)
+                except Exception:
+                    pass
+                for col in missing:
                     header.append(col)
                     ws.update_cell(1, len(header), col)
         st.session_state['_members_sheet_ok'] = True
@@ -598,9 +607,19 @@ def find_member_by_name(name):
     match = df[df['name'].astype(str) == str(name)]
     return match.iloc[0] if not match.empty else None
 
+def phone_as_text(phone):
+    """讓電話以「文字」寫入 Google Sheet,保留開頭的 0。
+    搭配 value_input_option='USER_ENTERED':前綴單引號會被 Sheets 當成文字標記,
+    讀取(get_all_records)時會自動移除,不會出現在資料中。"""
+    p = str(phone or '').strip()
+    if p and not p.startswith("'") and re.fullmatch(r'\d+', p):
+        return "'" + p
+    return p
+
 def save_member(name, phone, email, address, note="", birthday="", birth_time=""):
     ensure_members_sheet()
     birthday = normalize_birthday(birthday)  # 統一為 YYYY/MM/DD
+    phone = phone_as_text(phone)             # 保留電話開頭的 0
     ws = get_worksheet_for_write("Members")
     if not ws:
         return False
@@ -641,7 +660,8 @@ def save_member(name, phone, email, address, note="", birthday="", birth_time=""
             "last_order_date": str(date.today()),
         }
         new_row = [value_map.get(h, "") for h in header]
-        ws.append_row(new_row)
+        # USER_ENTERED 才能讓電話的單引號文字標記生效
+        ws.append_row(new_row, value_input_option='USER_ENTERED')
         clear_cache()
         return True
     except Exception:
