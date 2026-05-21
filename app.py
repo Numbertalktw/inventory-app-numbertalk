@@ -616,10 +616,20 @@ def phone_as_text(phone):
         return "'" + p
     return p
 
+def as_sheet_text(value):
+    """強制以「文字」寫入 Google Sheet,避免日期(1979/05/05)、時間(8:30)
+    被自動轉成日期/時間序列值。前綴的單引號讀取時會自動移除。"""
+    v = str(value or '').strip()
+    if v and not v.startswith("'"):
+        return "'" + v
+    return v
+
 def save_member(name, phone, email, address, note="", birthday="", birth_time=""):
     ensure_members_sheet()
-    birthday = normalize_birthday(birthday)  # 統一為 YYYY/MM/DD
-    phone = phone_as_text(phone)             # 保留電話開頭的 0
+    birthday = normalize_birthday(birthday)      # 統一為 YYYY/MM/DD
+    phone = phone_as_text(phone)                 # 保留電話開頭的 0
+    birthday = as_sheet_text(birthday)           # 以文字儲存,顯示為 1979/05/05
+    birth_time = as_sheet_text(birth_time)       # 以文字儲存,原樣顯示
     ws = get_worksheet_for_write("Members")
     if not ws:
         return False
