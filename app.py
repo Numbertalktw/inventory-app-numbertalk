@@ -690,15 +690,20 @@ def normalize_birthday(s):
 # ==========================================
 # 3.6b 會員關係鏈核心功能
 # ==========================================
-# 在會員之間建立關係 (配偶/父母/子女/朋友等),支援雙向查詢。
-# 儲存語意: "member_a 的 [relation_type] 是 member_b"
-RELATION_TYPES = ["配偶", "伴侶", "父母", "子女", "兄弟姊妹",
-                  "祖父母", "孫子女", "親戚", "朋友", "同事", "其他"]
+# 在會員之間建立關係 (配偶/父子/母女/朋友等),支援雙向查詢。
+# 儲存語意: "member_a 與 member_b 為 [relation_type]"
+# 親子類 (父子/父女/母子/母女): 會員A = 長輩(父/母),會員B = 晚輩(子/女)
+RELATION_TYPES = ["配偶", "伴侶", "父子", "父女", "母子", "母女",
+                  "兄弟姊妹", "祖父母", "孫子女", "親戚", "朋友", "同事", "其他"]
+# 親子類為「成對名稱」,本身已含雙方角色,反向視為同一關係
 RELATION_REVERSE = {
-    "配偶": "配偶", "伴侶": "伴侶", "父母": "子女", "子女": "父母",
+    "配偶": "配偶", "伴侶": "伴侶",
+    "父子": "父子", "父女": "父女", "母子": "母子", "母女": "母女",
     "兄弟姊妹": "兄弟姊妹", "祖父母": "孫子女", "孫子女": "祖父母",
     "親戚": "親戚", "朋友": "朋友", "同事": "同事", "其他": "其他",
 }
+# 親子類關係:A 為長輩、B 為晚輩,顯示時標明方向
+PARENT_CHILD_RELATIONS = {"父子", "父女", "母子", "母女"}
 RELATION_COLUMNS = ["relation_id", "member_a", "relation_type",
                     "member_b", "note", "created_at"]
 
@@ -754,7 +759,9 @@ def add_relation(member_a, relation_type, member_b, note=""):
         ws.append_row([rid, member_a, relation_type, member_b, note,
                        str(datetime.now())])
         clear_cache()
-        return True, f"已建立關係: {member_a} 的 {relation_type} 是 {member_b}"
+        if relation_type in PARENT_CHILD_RELATIONS:
+            return True, f"已建立關係: {member_a}(長輩) 與 {member_b}(晚輩) 為 {relation_type}"
+        return True, f"已建立關係: {member_a} 與 {member_b} 為 {relation_type}"
     except Exception as e:
         return False, f"建立失敗: {e}"
 
@@ -777,9 +784,28 @@ def delete_relation(relation_id):
         return False
 
 
+def describe_relation(viewer, target, relation_type, viewer_is_a):
+    """產生一句清楚的關係描述。
+    親子類: A=長輩(父/母), B=晚輩(子/女)。
+    例: 父子 → 長輩王大 對 晚輩王小,viewer 是長輩則「王大 是 王小 的 父親」。
+    """
+    if relation_type in PARENT_CHILD_RELATIONS:
+        elder_role = "父" if relation_type[0] == "父" else "母"
+        younger_role = "子" if relation_type[1] == "子" else "女"
+        elder_word = "父親" if elder_role == "父" else "母親"
+        younger_word = "兒子" if younger_role == "子" else "女兒"
+        if viewer_is_a:  # viewer 是長輩
+            return f"{viewer} 是 {target} 的 {elder_word}（{relation_type}）"
+        else:            # viewer 是晚輩
+            return f"{viewer} 是 {target} 的 {younger_word}（{relation_type}）"
+    else:
+        # 對稱關係: 配偶/朋友/兄弟姊妹...
+        return f"{viewer} 與 {target} 為 {relation_type}"
+
+
 def get_member_relations(name):
     """回傳該會員的所有關係(含反向推導)。
-    每筆: {target, relation, relation_id, note, reverse}
+    每筆: {target, relation, relation_id, note, reverse, desc}
     """
     df = load_relations()
     if df.empty:
@@ -792,14 +818,18 @@ def get_member_relations(name):
         rid = str(r.get('relation_id', ''))
         note = str(r.get('note', ''))
         if a == name:
-            # name 的 rt 是 b
-            results.append({'target': b, 'relation': rt, 'relation_id': rid,
-                            'note': note, 'reverse': False})
+            results.append({
+                'target': b, 'relation': rt, 'relation_id': rid,
+                'note': note, 'reverse': False,
+                'desc': describe_relation(name, b, rt, viewer_is_a=True),
+            })
         elif b == name:
-            # b 是 name 的反向關係
             rev = RELATION_REVERSE.get(rt, rt)
-            results.append({'target': a, 'relation': rev, 'relation_id': rid,
-                            'note': note, 'reverse': True})
+            results.append({
+                'target': a, 'relation': rev, 'relation_id': rid,
+                'note': note, 'reverse': True,
+                'desc': describe_relation(name, a, rt, viewer_is_a=False),
+            })
     return results
 
 
@@ -2208,12 +2238,13 @@ elif page == "👥 會員管理":
 
             # --- 建立新關係 ---
             st.markdown("##### ➕ 建立關係")
-            st.caption("語意:「A 的 [關係] 是 B」。例如「王小明 的 配偶 是 李美麗」,系統會自動推導反向關係。")
+            st.caption("親子類(父子/父女/母子/母女):**會員A 選長輩(父/母)、會員B 選晚輩(子/女)**。"
+                       "其他對稱關係(配偶/朋友等)順序不拘。系統會自動推導反向關係。")
             with st.form("add_relation_form"):
                 rc1, rc2, rc3 = st.columns([2, 1.2, 2])
-                rel_a = rc1.selectbox("會員 A", member_names, key="rel_a")
+                rel_a = rc1.selectbox("會員 A (親子類請選長輩)", member_names, key="rel_a")
                 rel_type = rc2.selectbox("關係", RELATION_TYPES, key="rel_type")
-                rel_b = rc3.selectbox("會員 B", member_names,
+                rel_b = rc3.selectbox("會員 B (親子類請選晚輩)", member_names,
                                       index=min(1, len(member_names) - 1), key="rel_b")
                 rel_note = st.text_input("備註 (選填)", key="rel_note")
                 if st.form_submit_button("建立關係", type="primary"):
@@ -2238,8 +2269,7 @@ elif page == "👥 會員管理":
                 for rel in rels:
                     rc1, rc2, rc3 = st.columns([4, 2, 1])
                     arrow = "↩ (反向推導)" if rel['reverse'] else ""
-                    rc1.write(f"**{view_member}** 的 **{rel['relation']}** 是 "
-                              f"**{rel['target']}** {arrow}")
+                    rc1.write(f"{rel['desc']} {arrow}")
                     # 顯示對方生日(若有)
                     tgt = df_members[df_members['name'].astype(str) == rel['target']]
                     if not tgt.empty:
