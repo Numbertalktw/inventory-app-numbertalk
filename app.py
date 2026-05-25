@@ -14,7 +14,7 @@ SPREADSHEET_NAME = "numbertalk-system"
 WAREHOUSES = ["Wen", "千畇", "James", "Imeng"]
 CATEGORIES = ["天然石", "金屬配件", "線材", "包裝材料", "完成品", "數字珠", "數字串", "香料", "手作設備"]
 SERIES = ["原料", "半成品", "成品", "包材", "生命數字能量項鍊", "數字手鍊", "貼紙", "小卡", "火漆章", "能量蠟燭", "香包", "水晶", "魔法鹽"]
-KEYERS = ["Wen", "千畇", "James", "Imeng", "小幫手"]
+KEYERS = ["千畇", "James", "Imeng", "小幫手"]
 SHIPPING_METHODS = ["郵局", "i郵箱", "全家", "7-11", "自取"]
 
 ORDER_STATUSES = ["已確認", "未付款/未出貨", "已付款/未出貨", "未付款/已出貨", "已完成"]
