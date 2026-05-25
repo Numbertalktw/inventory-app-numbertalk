@@ -934,18 +934,25 @@ def ensure_wage_sheets():
         if not ws_emp.row_values(1):
             ws_emp.append_row(["id", "name", "multProd"])
 
-    # WageCatalog
+    # WageCatalog（含每階段負責員工欄位）
     if "WageCatalog" not in existing_titles:
-        ws_cat = sh.add_worksheet(title="WageCatalog", rows=200, cols=6)
-        ws_cat.append_row(["name", "wageMake", "wagePack", "wageShip", "wageSvc"])
+        ws_cat = sh.add_worksheet(title="WageCatalog", rows=200, cols=9)
+        ws_cat.append_row(["name", "wageMake", "wagePack", "wageShip", "wageSvc", "empMake", "empPack", "empShip"])
         for p in DEFAULT_WAGE_CATALOG:
-            ws_cat.append_row([p["name"], p["wageMake"], p["wagePack"], p["wageShip"], p["wageSvc"]])
+            ws_cat.append_row([p["name"], p["wageMake"], p["wagePack"], p["wageShip"], p["wageSvc"], "", "", ""])
     else:
         ws_cat = sh.worksheet("WageCatalog")
-        if not ws_cat.row_values(1):
-            ws_cat.append_row(["name", "wageMake", "wagePack", "wageShip", "wageSvc"])
+        header = ws_cat.row_values(1)
+        if not header:
+            ws_cat.append_row(["name", "wageMake", "wagePack", "wageShip", "wageSvc", "empMake", "empPack", "empShip"])
             for p in DEFAULT_WAGE_CATALOG:
-                ws_cat.append_row([p["name"], p["wageMake"], p["wagePack"], p["wageShip"], p["wageSvc"]])
+                ws_cat.append_row([p["name"], p["wageMake"], p["wagePack"], p["wageShip"], p["wageSvc"], "", "", ""])
+        else:
+            # 補上新欄位（若舊工作表缺少）
+            for col_name in ["empMake", "empPack", "empShip"]:
+                if col_name not in header:
+                    ws_cat.update_cell(1, len(header) + 1, col_name)
+                    header.append(col_name)
 
     # WageEntries
     if "WageEntries" not in existing_titles:
@@ -980,6 +987,9 @@ def load_wage_catalog():
     for col in ["wageMake", "wagePack", "wageShip", "wageSvc"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+    for col in ["empMake", "empPack", "empShip"]:
+        if col not in df.columns:
+            df[col] = ""
     return df
 
 def load_wage_entries(year_month=None):
@@ -1042,15 +1052,16 @@ def delete_wage_employee(name):
             return True
     return False
 
-def save_wage_product(product_name, wage_make=0, wage_pack=0, wage_ship=0, wage_svc=0):
+def save_wage_product(product_name, wage_make=0, wage_pack=0, wage_ship=0, wage_svc=0, emp_make="", emp_pack="", emp_ship=""):
     ws = get_worksheet_for_write("WageCatalog")
     data = ws.get_all_values()
+    header = data[0] if data else []
     for i, row in enumerate(data[1:], start=2):
         if row and row[0] == product_name:
-            ws.update(f"B{i}:E{i}", [[wage_make, wage_pack, wage_ship, wage_svc]])
+            ws.update(f"B{i}:H{i}", [[wage_make, wage_pack, wage_ship, wage_svc, emp_make, emp_pack, emp_ship]])
             clear_cache()
             return True
-    ws.append_row([product_name, wage_make, wage_pack, wage_ship, wage_svc])
+    ws.append_row([product_name, wage_make, wage_pack, wage_ship, wage_svc, emp_make, emp_pack, emp_ship])
     clear_cache()
     return True
 
@@ -1077,6 +1088,55 @@ def mark_wage_settlement(year_month, total):
     ws.append_row([year_month, settled_at, total])
     clear_cache()
     return True
+
+def auto_create_wage_entries_for_order(order_no, order_date, keyer=""):
+    """訂單變為「已完成」時，自動依產品目錄建立製造/包裝/出貨工資紀錄"""
+    items = load_order_items(order_no)
+    if items.empty:
+        return 0
+    df_cat = load_wage_catalog()
+    if df_cat.empty:
+        return 0
+
+    stages = [
+        ("製造", "wageMake", "empMake"),
+        ("包裝", "wagePack", "empPack"),
+        ("出貨", "wageShip", "empShip"),
+    ]
+    count = 0
+    date_str = str(order_date)
+
+    for _, item in items.iterrows():
+        product_name = str(item.get('product_name', ''))
+        qty = float(item.get('qty', 1) or 1)
+
+        # 比對產品目錄（完全一致優先，其次模糊）
+        cat_match = df_cat[df_cat['name'] == product_name]
+        if cat_match.empty:
+            cat_match = df_cat[df_cat['name'].str.contains(product_name[:8], na=False, regex=False)]
+        if cat_match.empty:
+            continue
+        cat_row = cat_match.iloc[0]
+
+        for stage, wage_col, emp_col in stages:
+            wage = float(cat_row.get(wage_col, 0) or 0)
+            emp = str(cat_row.get(emp_col, '') or '').strip()
+            if wage > 0 and emp and emp.lower() != 'nan':
+                amount = round(wage * qty, 2)
+                add_wage_entry(
+                    date_str=date_str,
+                    employee_name=emp,
+                    category="產品",
+                    stage=stage,
+                    item=product_name,
+                    qty=qty,
+                    price=wage,
+                    amount=amount,
+                    note=f"自動帶入｜訂單 {order_no}",
+                    created_by=keyer
+                )
+                count += 1
+    return count
 
 # ==========================================
 # 4. 主程式分頁
@@ -1473,6 +1533,12 @@ elif page == "🛒 訂單管理":
                                     ok, msg = ship_order(ono, ship_user, s_method, s_no, new_st)
                                     if ok:
                                         st.success(msg)
+                                        if new_st == "已完成":
+                                            w_cnt = auto_create_wage_entries_for_order(
+                                                ono, row.get('order_date', date.today()),
+                                                ship_user if need_ship else "")
+                                            if w_cnt > 0:
+                                                st.info(f"💰 已自動建立 {w_cnt} 筆工資紀錄")
                                         time.sleep(1)
                                         st.rerun()
                                     else:
@@ -1480,6 +1546,11 @@ elif page == "🛒 訂單管理":
                                 else:
                                     if update_order_status(ono, new_st):
                                         st.success(f"狀態已更新為: {new_st}")
+                                        if new_st == "已完成":
+                                            w_cnt = auto_create_wage_entries_for_order(
+                                                ono, row.get('order_date', date.today()), "")
+                                            if w_cnt > 0:
+                                                st.info(f"💰 已自動建立 {w_cnt} 筆工資紀錄")
                                         time.sleep(1)
                                         st.rerun()
 
@@ -2021,27 +2092,46 @@ elif page == "💰 工資管理":
         prod_list2 = df_cat2['name'].tolist() if not df_cat2.empty else []
         edit_mode = st.selectbox("選擇已有產品編輯（或留空新增）", ["（新增產品）"] + prod_list2)
 
-        default_vals = {"wageMake": 0.0, "wagePack": 0.0, "wageShip": 0.0, "wageSvc": 0.0}
+        default_vals = {"wageMake": 0.0, "wagePack": 0.0, "wageShip": 0.0, "wageSvc": 0.0,
+                        "empMake": "", "empPack": "", "empShip": ""}
         default_name = ""
         if edit_mode != "（新增產品）" and not df_cat2.empty:
             row_e = df_cat2[df_cat2['name'] == edit_mode]
             if not row_e.empty:
                 default_name = edit_mode
-                for k in default_vals:
+                for k in ["wageMake", "wagePack", "wageShip", "wageSvc"]:
                     default_vals[k] = float(row_e.iloc[0].get(k, 0) or 0)
+                for k in ["empMake", "empPack", "empShip"]:
+                    v = str(row_e.iloc[0].get(k, '') or '')
+                    default_vals[k] = "" if v.lower() == 'nan' else v
+
+        emp_options = ["（不設定）"] + [e for e in load_wage_employees()['name'].tolist() if e]
 
         with st.form("prod_wage_form", clear_on_submit=False):
             cp_name = st.text_input("產品名稱 *必填", value=default_name)
+            st.markdown("**工資設定**")
             cp1, cp2, cp3, cp4 = st.columns(4)
             cp_make = cp1.number_input("製造工資/件", min_value=0.0, value=default_vals["wageMake"], step=1.0)
             cp_pack = cp2.number_input("包裝工資/件", min_value=0.0, value=default_vals["wagePack"], step=1.0)
             cp_ship = cp3.number_input("出貨工資/件", min_value=0.0, value=default_vals["wageShip"], step=1.0)
-            cp_svc  = cp4.number_input("服務費/件",  min_value=0.0, value=default_vals["wageSvc"],  step=10.0)
+            cp_svc  = cp4.number_input("服務費/件",   min_value=0.0, value=default_vals["wageSvc"],  step=10.0)
+
+            st.markdown("**訂單完成時自動帶入的員工**")
+            st.caption("設定後，訂單變為「已完成」時會自動建立對應工資紀錄")
+            ea1, ea2, ea3 = st.columns(3)
+            def_idx = lambda k: emp_options.index(default_vals[k]) if default_vals[k] in emp_options else 0
+            cp_emp_make = ea1.selectbox("製造負責人", emp_options, index=def_idx("empMake"), key="cp_em")
+            cp_emp_pack = ea2.selectbox("包裝負責人", emp_options, index=def_idx("empPack"), key="cp_ep")
+            cp_emp_ship = ea3.selectbox("出貨負責人", emp_options, index=def_idx("empShip"), key="cp_es")
+
             if st.form_submit_button("💾 儲存產品", use_container_width=True):
                 if not cp_name.strip():
                     st.error("請填寫產品名稱")
                 else:
-                    save_wage_product(cp_name.strip(), cp_make, cp_pack, cp_ship, cp_svc)
+                    em = "" if cp_emp_make == "（不設定）" else cp_emp_make
+                    ep = "" if cp_emp_pack == "（不設定）" else cp_emp_pack
+                    es = "" if cp_emp_ship == "（不設定）" else cp_emp_ship
+                    save_wage_product(cp_name.strip(), cp_make, cp_pack, cp_ship, cp_svc, em, ep, es)
                     st.success(f"產品「{cp_name.strip()}」已儲存")
                     time.sleep(1)
                     st.rerun()
