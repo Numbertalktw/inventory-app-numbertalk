@@ -81,8 +81,19 @@ def render_numerology_table(bday_str, lunar_bday_str="", key_prefix=""):
     """參考 IF Crystal 格式：顯示三年流年 x 階段數對照表（國曆 + 農曆並排）"""
     parsed = parse_birthday(bday_str)
     if not parsed:
-        st.info("請輸入生日（格式: YYYY/MM/DD）以顯示數字能量")
-        return False
+        # 如果只有農曆生日，用農曆生日來計算
+        lunar_only = parse_birthday(lunar_bday_str) if lunar_bday_str else None
+        if not lunar_only:
+            st.info("請輸入生日（格式: YYYY/MM/DD）以顯示數字能量")
+            return False
+        # 只有農曆 → 只顯示農曆階段數
+        ly, lm, ld = lunar_only
+        lunar_jieduan = calc_jieduan(ly, lm)
+        lunar_jd_final = lunar_jieduan.split("/")[-1]
+        st.markdown("##### 📊 流年 × 階段數 三年對照表")
+        st.markdown(f"**🌙 農曆階段數：** `{lunar_jd_final}`　（{ly}年 + {lm}月 → {lunar_jieduan}）")
+        st.markdown("*（未填國曆生日，僅顯示農曆階段數）*")
+        return True
     by, bm, bd = parsed
     years = personal_year_range(bm, bd)
     labels = ["去年", "今年", "明年"]
@@ -395,16 +406,40 @@ def ensure_order_sheets():
     try:
         existing = [ws.title for ws in sh.worksheets()]
         if "Orders" not in existing:
-            ws = sh.add_worksheet(title="Orders", rows=1000, cols=15)
+            ws = sh.add_worksheet(title="Orders", rows=1000, cols=20)
             ws.append_row(["order_no", "order_date", "customer_name", "customer_phone",
                            "customer_email", "shipping_address", "status", "total_amount",
                            "note", "created_by", "created_at", "discount", "shipping_fee",
-                           "items_total", "birthday", "lunar_birthday"])
+                           "items_total", "birthday", "lunar_birthday", "birth_time"])
         if "OrderItems" not in existing:
             ws = sh.add_worksheet(title="OrderItems", rows=5000, cols=8)
             ws.append_row(["order_no", "sku", "product_name", "qty", "unit_price",
                            "subtotal", "warehouse"])
         st.session_state['_order_sheets_ok'] = True
+    except Exception:
+        pass
+
+def ensure_extra_columns():
+    """確保既有的 Orders / Members 工作表含有 birthday, lunar_birthday, birth_time 欄位"""
+    if st.session_state.get('_extra_cols_ok'):
+        return
+    try:
+        for sheet_name, needed_cols in [
+            ("Orders", ["birthday", "lunar_birthday", "birth_time"]),
+            ("Members", ["birthday", "lunar_birthday", "birth_time"]),
+        ]:
+            ws = get_worksheet(sheet_name)
+            if not ws:
+                continue
+            header = ws.row_values(1)
+            for col_name in needed_cols:
+                if col_name not in header:
+                    ws_w = get_worksheet_for_write(sheet_name)
+                    if ws_w:
+                        new_header = ws_w.row_values(1)
+                        if col_name not in new_header:
+                            ws_w.update_cell(1, len(new_header) + 1, col_name)
+        st.session_state['_extra_cols_ok'] = True
     except Exception:
         pass
 
@@ -414,8 +449,9 @@ def generate_order_no():
 
 def create_order(order_no, order_date, customer_name, customer_phone,
                  customer_email, shipping_address, items, note, created_by,
-                 discount=0, shipping_fee=0, birthday="", lunar_birthday=""):
+                 discount=0, shipping_fee=0, birthday="", lunar_birthday="", birth_time=""):
     ensure_order_sheets()
+    ensure_extra_columns()
     ws_orders = get_worksheet_for_write("Orders")
     ws_items = get_worksheet_for_write("OrderItems")
     if not ws_orders or not ws_items:
@@ -423,13 +459,24 @@ def create_order(order_no, order_date, customer_name, customer_phone,
     try:
         items_total = sum(item['subtotal'] for item in items)
         total = items_total - float(discount) + float(shipping_fee)
-        ws_orders.append_row([
-            order_no, str(order_date), customer_name, customer_phone,
-            customer_email, shipping_address, "已確認", float(total),
-            note, created_by, str(datetime.now()),
-            float(discount), float(shipping_fee), float(items_total),
-            str(birthday), str(lunar_birthday)
-        ])
+        header = ws_orders.row_values(1)
+        row_data = [''] * len(header)
+        col_map = {h: i for i, h in enumerate(header)}
+        field_vals = {
+            'order_no': order_no, 'order_date': str(order_date),
+            'customer_name': customer_name, 'customer_phone': customer_phone,
+            'customer_email': customer_email, 'shipping_address': shipping_address,
+            'status': "已確認", 'total_amount': float(total),
+            'note': note, 'created_by': created_by, 'created_at': str(datetime.now()),
+            'discount': float(discount), 'shipping_fee': float(shipping_fee),
+            'items_total': float(items_total),
+            'birthday': str(birthday), 'lunar_birthday': str(lunar_birthday),
+            'birth_time': str(birth_time)
+        }
+        for k, v in field_vals.items():
+            if k in col_map:
+                row_data[col_map[k]] = v
+        ws_orders.append_row(row_data)
         for item in items:
             ws_items.append_row([
                 order_no, item['sku'], item['product_name'],
@@ -438,13 +485,14 @@ def create_order(order_no, order_date, customer_name, customer_phone,
             ])
         clear_cache()
         save_member(customer_name, customer_phone, customer_email, shipping_address,
-                    birthday=birthday, lunar_birthday=lunar_birthday)
+                    birthday=birthday, lunar_birthday=lunar_birthday, birth_time=birth_time)
         return True, f"訂單 {order_no} 建立成功"
     except Exception as e:
         return False, f"建立失敗: {e}"
 
 def load_orders():
     ensure_order_sheets()
+    ensure_extra_columns()
     df = load_data("Orders")
     if df.empty:
         return pd.DataFrame(columns=["order_no", "order_date", "customer_name",
@@ -456,7 +504,7 @@ def load_orders():
         if col not in df.columns:
             df[col] = 0
         df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-    for col in ['birthday', 'lunar_birthday']:
+    for col in ['birthday', 'lunar_birthday', 'birth_time']:
         if col not in df.columns:
             df[col] = ""
     return df
@@ -644,22 +692,23 @@ def ensure_members_sheet():
     try:
         existing = [ws.title for ws in sh.worksheets()]
         if "Members" not in existing:
-            ws = sh.add_worksheet(title="Members", rows=2000, cols=10)
+            ws = sh.add_worksheet(title="Members", rows=2000, cols=12)
             ws.append_row(["member_id", "name", "phone", "email", "address",
                            "note", "created_at", "last_order_date",
-                           "birthday", "lunar_birthday"])
+                           "birthday", "lunar_birthday", "birth_time"])
         st.session_state['_members_sheet_ok'] = True
     except Exception:
         pass
 
 def load_members():
     ensure_members_sheet()
+    ensure_extra_columns()
     df = load_data("Members")
     if df.empty:
         return pd.DataFrame(columns=["member_id", "name", "phone", "email",
                                       "address", "note", "created_at", "last_order_date",
-                                      "birthday", "lunar_birthday"])
-    for col in ['birthday', 'lunar_birthday']:
+                                      "birthday", "lunar_birthday", "birth_time"])
+    for col in ['birthday', 'lunar_birthday', 'birth_time']:
         if col not in df.columns:
             df[col] = ""
     return df
@@ -671,8 +720,9 @@ def find_member_by_name(name):
     match = df[df['name'].astype(str) == str(name)]
     return match.iloc[0] if not match.empty else None
 
-def save_member(name, phone, email, address, note="", birthday="", lunar_birthday=""):
+def save_member(name, phone, email, address, note="", birthday="", lunar_birthday="", birth_time=""):
     ensure_members_sheet()
+    ensure_extra_columns()
     ws = get_worksheet_for_write("Members")
     if not ws:
         return False
@@ -703,12 +753,23 @@ def save_member(name, phone, email, address, note="", birthday="", lunar_birthda
                         if lunar_birthday and "lunar_birthday" in header:
                             lb_idx = header.index("lunar_birthday")
                             ws.update_cell(i, lb_idx + 1, str(lunar_birthday))
+                        if birth_time and "birth_time" in header:
+                            bt_idx = header.index("birth_time")
+                            ws.update_cell(i, bt_idx + 1, str(birth_time))
                         clear_cache()
                         return True
         mid = f"M-{int(time.time()) % 100000:05d}"
-        ws.append_row([mid, name, phone, email, address, note,
-                       str(datetime.now()), str(date.today()),
-                       str(birthday), str(lunar_birthday)])
+        header = ws.row_values(1)
+        row_data = [''] * len(header)
+        col_map = {h: i for i, h in enumerate(header)}
+        for k, v in [('member_id', mid), ('name', name), ('phone', phone),
+                     ('email', email), ('address', address), ('note', note),
+                     ('created_at', str(datetime.now())), ('last_order_date', str(date.today())),
+                     ('birthday', str(birthday)), ('lunar_birthday', str(lunar_birthday)),
+                     ('birth_time', str(birth_time))]:
+            if k in col_map:
+                row_data[col_map[k]] = v
+        ws.append_row(row_data)
         clear_cache()
         return True
     except Exception:
@@ -750,7 +811,8 @@ def sync_members_from_orders():
         addr = str(row.get('shipping_address', ''))
         bday = str(row.get('birthday', ''))
         lbday = str(row.get('lunar_birthday', ''))
-        save_member(name, phone, email, addr, birthday=bday, lunar_birthday=lbday)
+        btime = str(row.get('birth_time', ''))
+        save_member(name, phone, email, addr, birthday=bday, lunar_birthday=lbday, birth_time=btime)
         count += 1
     return count
 
@@ -941,8 +1003,9 @@ elif page == "🛒 訂單管理":
                     st.session_state["o_caddr"] = str(m['address'])
                     st.session_state["o_bday"] = str(m.get('birthday', ''))
                     st.session_state["o_lbday"] = str(m.get('lunar_birthday', ''))
+                    st.session_state["o_btime"] = str(m.get('birth_time', ''))
             else:
-                for k in ["o_cname", "o_cphone", "o_cemail", "o_caddr", "o_bday", "o_lbday"]:
+                for k in ["o_cname", "o_cphone", "o_cemail", "o_caddr", "o_bday", "o_lbday", "o_btime"]:
                     st.session_state[k] = ""
 
         cc1, cc2 = st.columns(2)
@@ -951,10 +1014,11 @@ elif page == "🛒 訂單管理":
         cc3, cc4 = st.columns(2)
         cust_email = cc3.text_input("Email", key="o_cemail")
         ship_addr = cc4.text_input("寄送地址", key="o_caddr")
-        bd1, bd2 = st.columns(2)
+        bd1, bd2, bd3 = st.columns(3)
         o_birthday = bd1.text_input("🌞 國曆生日 (YYYY/MM/DD)", key="o_bday")
         o_lunar_bday = bd2.text_input("🌙 農曆生日 (YYYY/MM/DD)", key="o_lbday")
-        if o_birthday:
+        o_birth_time = bd3.text_input("🕐 出生時間 (HH:MM)", key="o_btime")
+        if o_birthday or o_lunar_bday:
             render_numerology_table(o_birthday, o_lunar_bday, key_prefix="new_order")
         o_note = st.text_input("訂單備註", key="o_note")
         o_user = st.selectbox("建立人", ["James", "Imeng", "小幫手"], key="o_user")
@@ -1019,7 +1083,7 @@ elif page == "🛒 訂單管理":
                         cust_email, ship_addr,
                         st.session_state['order_items'], o_note, o_user,
                         o_discount, o_ship_fee,
-                        o_birthday, o_lunar_bday
+                        o_birthday, o_lunar_bday, o_birth_time
                     )
                     if ok:
                         st.session_state['order_items'] = []
@@ -1054,11 +1118,13 @@ elif page == "🛒 訂單管理":
                         st.write(f"地址: {row.get('shipping_address', '')}")
                         o_bday = str(row.get('birthday', ''))
                         o_lbday = str(row.get('lunar_birthday', ''))
-                        if o_bday or o_lbday:
+                        o_btime = str(row.get('birth_time', ''))
+                        if o_bday or o_lbday or o_btime:
                             bd_txt = f"🌞 國曆: {o_bday}" if o_bday else ""
                             lb_txt = f"🌙 農曆: {o_lbday}" if o_lbday else ""
-                            st.write(f"{bd_txt}  {lb_txt}")
-                        if o_bday:
+                            bt_txt = f"🕐 出生時間: {o_btime}" if o_btime else ""
+                            st.write(f"{bd_txt}  {lb_txt}  {bt_txt}".strip())
+                        if o_bday or o_lbday:
                             with st.container():
                                 render_numerology_table(o_bday, o_lbday, key_prefix=f"{kp}_{ono}")
                         r_disc = float(row.get('discount', 0))
@@ -1118,16 +1184,18 @@ elif page == "🛒 訂單管理":
                                 ei3, ei4 = st.columns(2)
                                 e_email = ei3.text_input("Email", value=str(row.get('customer_email', '')))
                                 e_addr = ei4.text_input("地址", value=str(row.get('shipping_address', '')))
-                                ebd1, ebd2 = st.columns(2)
+                                ebd1, ebd2, ebd3 = st.columns(3)
                                 e_bday = ebd1.text_input("🌞 國曆生日", value=str(row.get('birthday', '')))
                                 e_lbday = ebd2.text_input("🌙 農曆生日", value=str(row.get('lunar_birthday', '')))
+                                e_btime = ebd3.text_input("🕐 出生時間 (HH:MM)", value=str(row.get('birth_time', '')))
                                 e_note = st.text_input("備註", value=str(row.get('note', '')))
                                 if st.form_submit_button("💾 儲存客戶資訊", use_container_width=True):
                                     if update_order_fields(ono, {
                                         'customer_name': e_name, 'customer_phone': e_phone,
                                         'customer_email': e_email, 'shipping_address': e_addr,
                                         'note': e_note, 'birthday': e_bday,
-                                        'lunar_birthday': e_lbday
+                                        'lunar_birthday': e_lbday,
+                                        'birth_time': e_btime
                                     }):
                                         st.success("客戶資訊已更新")
                                         time.sleep(1)
@@ -1230,12 +1298,22 @@ elif page == "🛒 訂單管理":
                     dc2.metric("優惠折扣", f"-${d_disc:,.0f}")
                     dc3.metric("運費", f"${d_ship:,.0f}")
 
-                # === 數字能量顯示 ===
+                # === 生日 / 出生時間 / 數字能量顯示 ===
                 det_bday = str(row.get('birthday', ''))
                 det_lbday = str(row.get('lunar_birthday', ''))
-                if det_bday:
+                det_btime = str(row.get('birth_time', ''))
+                if det_bday or det_lbday or det_btime:
                     st.markdown("---")
-                    st.markdown(f"#### 🔢 數字能量（生日: {det_bday}）")
+                    bd_parts = []
+                    if det_bday:
+                        bd_parts.append(f"🌞 國曆: {det_bday}")
+                    if det_lbday:
+                        bd_parts.append(f"🌙 農曆: {det_lbday}")
+                    if det_btime:
+                        bd_parts.append(f"🕐 出生時間: {det_btime}")
+                    st.write("　".join(bd_parts))
+                if det_bday or det_lbday:
+                    st.markdown(f"#### 🔢 數字能量")
                     render_numerology_table(det_bday, det_lbday, key_prefix="detail")
 
                 # === 訂單品項列表 ===
@@ -1266,9 +1344,10 @@ elif page == "🛒 訂單管理":
                         ei_c3, ei_c4 = st.columns(2)
                         e_email = ei_c3.text_input("Email", value=str(row.get('customer_email', '')))
                         e_addr = ei_c4.text_input("寄送地址", value=str(row.get('shipping_address', '')))
-                        ei_b1, ei_b2 = st.columns(2)
+                        ei_b1, ei_b2, ei_b3 = st.columns(3)
                         e_bday = ei_b1.text_input("🌞 國曆生日", value=str(row.get('birthday', '')))
                         e_lbday = ei_b2.text_input("🌙 農曆生日", value=str(row.get('lunar_birthday', '')))
+                        e_btime = ei_b3.text_input("🕐 出生時間 (HH:MM)", value=str(row.get('birth_time', '')))
                         e_note = st.text_input("備註", value=str(row.get('note', '')))
                         if st.form_submit_button("💾 儲存客戶資訊", use_container_width=True):
                             updates = {
@@ -1278,7 +1357,8 @@ elif page == "🛒 訂單管理":
                                 'shipping_address': e_addr,
                                 'note': e_note,
                                 'birthday': e_bday,
-                                'lunar_birthday': e_lbday
+                                'lunar_birthday': e_lbday,
+                                'birth_time': e_btime
                             }
                             if update_order_fields(sel_ono, updates):
                                 st.success("客戶資訊已更新")
@@ -1375,11 +1455,12 @@ elif page == "👥 會員管理":
                 filtered_m = filtered_m[mask]
 
             st.markdown(f"共 **{len(filtered_m)}** 位會員")
-            disp_cols = ['name', 'phone', 'email', 'address', 'birthday', 'lunar_birthday', 'last_order_date']
+            disp_cols = ['name', 'phone', 'email', 'address', 'birthday', 'lunar_birthday', 'birth_time', 'last_order_date']
             disp_cols = [c for c in disp_cols if c in filtered_m.columns]
             rename_map = {'name': '姓名', 'phone': '電話', 'email': 'Email',
                           'address': '地址', 'birthday': '國曆生日',
-                          'lunar_birthday': '農曆生日', 'last_order_date': '最後訂單日期'}
+                          'lunar_birthday': '農曆生日', 'birth_time': '出生時間',
+                          'last_order_date': '最後訂單日期'}
             st.dataframe(
                 filtered_m[disp_cols].rename(columns=rename_map),
                 use_container_width=True, hide_index=True
@@ -1395,19 +1476,23 @@ elif page == "👥 會員管理":
                     # 顯示數字能量
                     m_bday = str(m_data.get('birthday', ''))
                     m_lbday = str(m_data.get('lunar_birthday', ''))
-                    if m_bday:
+                    m_btime = str(m_data.get('birth_time', ''))
+                    if m_bday or m_lbday:
                         st.markdown("#### 🔢 數字能量")
+                        if m_btime:
+                            st.write(f"🕐 出生時間: {m_btime}")
                         render_numerology_table(m_bday, m_lbday, key_prefix="member")
                     with st.form("edit_member"):
                         em_phone = st.text_input("電話", value=str(m_data.get('phone', '')))
                         em_email = st.text_input("Email", value=str(m_data.get('email', '')))
                         em_addr = st.text_input("地址", value=str(m_data.get('address', '')))
-                        em_b1, em_b2 = st.columns(2)
+                        em_b1, em_b2, em_b3 = st.columns(3)
                         em_bday = em_b1.text_input("🌞 國曆生日 (YYYY/MM/DD)", value=m_bday)
                         em_lbday = em_b2.text_input("🌙 農曆生日 (YYYY/MM/DD)", value=m_lbday)
+                        em_btime = em_b3.text_input("🕐 出生時間 (HH:MM)", value=m_btime)
                         if st.form_submit_button("儲存修改"):
                             save_member(sel_m, em_phone, em_email, em_addr,
-                                        birthday=em_bday, lunar_birthday=em_lbday)
+                                        birthday=em_bday, lunar_birthday=em_lbday, birth_time=em_btime)
                             st.success("會員資料已更新")
                             time.sleep(1)
                             st.rerun()
@@ -1424,9 +1509,10 @@ elif page == "👥 會員管理":
             am_phone = am_c1.text_input("電話")
             am_email = am_c2.text_input("Email")
             am_addr = st.text_input("地址")
-            am_b1, am_b2 = st.columns(2)
+            am_b1, am_b2, am_b3 = st.columns(3)
             am_bday = am_b1.text_input("🌞 國曆生日 (YYYY/MM/DD)")
             am_lbday = am_b2.text_input("🌙 農曆生日 (YYYY/MM/DD)")
+            am_btime = am_b3.text_input("🕐 出生時間 (HH:MM)")
             am_note = st.text_input("備註")
             if st.form_submit_button("新增會員", use_container_width=True):
                 if not am_name:
@@ -1436,7 +1522,7 @@ elif page == "👥 會員管理":
                     if existing is not None:
                         st.warning(f"會員 '{am_name}' 已存在，將更新資料")
                     save_member(am_name, am_phone, am_email, am_addr, am_note,
-                                birthday=am_bday, lunar_birthday=am_lbday)
+                                birthday=am_bday, lunar_birthday=am_lbday, birth_time=am_btime)
                     st.success(f"會員 '{am_name}' 已儲存")
                     time.sleep(1)
                     st.rerun()
