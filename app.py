@@ -2019,8 +2019,12 @@ elif page == "💰 工資管理":
                         st.rerun()
             st.divider()
             # 匯出 CSV
-            csv_data = df_this[['date', 'employee_name', 'category', 'stage', 'item', 'qty', 'price', 'amount', 'note']].copy()
-            csv_data.columns = ['日期', '員工', '類別', '階段', '項目', '數量', '單價', '金額', '備註']
+            csv_cols = ['date', 'employee_name', 'category', 'stage', 'item', 'qty', 'price', 'amount', 'note']
+            csv_rename = {'date': '日期', 'employee_name': '員工', 'category': '類別',
+                          'stage': '階段', 'item': '項目', 'qty': '數量',
+                          'price': '單價', 'amount': '金額', 'note': '備註'}
+            exist_cols = [c for c in csv_cols if c in df_this.columns]
+            csv_data = df_this[exist_cols].rename(columns=csv_rename)
             st.download_button("⬇️ 匯出本月 CSV", csv_data.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig'),
                                f"工資報表_{cur_ym}.csv", "text/csv")
 
@@ -2071,8 +2075,12 @@ elif page == "💰 工資管理":
             else:
                 st.info(f"此月份已結算（NT$ {grand_total:,.0f}）")
 
-            csv_rpt = df_rpt[['date', 'employee_name', 'category', 'stage', 'item', 'qty', 'price', 'amount', 'note']].copy()
-            csv_rpt.columns = ['日期', '員工', '類別', '階段', '項目', '數量', '單價', '金額', '備註']
+            rpt_cols = ['date', 'employee_name', 'category', 'stage', 'item', 'qty', 'price', 'amount', 'note']
+            rpt_rename = {'date': '日期', 'employee_name': '員工', 'category': '類別',
+                          'stage': '階段', 'item': '項目', 'qty': '數量',
+                          'price': '單價', 'amount': '金額', 'note': '備註'}
+            exist_rpt_cols = [c for c in rpt_cols if c in df_rpt.columns]
+            csv_rpt = df_rpt[exist_rpt_cols].rename(columns=rpt_rename)
             st.download_button("⬇️ 匯出報表 CSV", csv_rpt.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig'),
                                f"工資報表_{rpt_ym}.csv", "text/csv")
 
