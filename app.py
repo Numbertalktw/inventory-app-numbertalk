@@ -2049,13 +2049,22 @@ elif page == "💰 工資管理":
             else:
                 st.warning("⚠️ 本月尚未結算")
 
+            # 確保必要欄位存在
+            for _col in ['employee_name', 'amount', 'category', 'stage']:
+                if _col not in df_rpt.columns:
+                    df_rpt[_col] = ""
+
             # 按員工分組
             for emp_name, grp in df_rpt.groupby('employee_name'):
                 with st.expander(f"👷 {emp_name}　NT$ {grp['amount'].sum():,.0f}"):
-                    cat_summary = grp.groupby(['category', 'stage'])['amount'].sum().reset_index()
-                    for _, cs in cat_summary.iterrows():
-                        cat_lbl = str(cs['category']) + (f" · {cs['stage']}" if cs['stage'] else "")
-                        st.write(f"  {cat_lbl}：NT$ {cs['amount']:,.0f}")
+                    grp_by_cols = [c for c in ['category', 'stage'] if c in grp.columns]
+                    if grp_by_cols:
+                        cat_summary = grp.groupby(grp_by_cols)['amount'].sum().reset_index()
+                        for _, cs in cat_summary.iterrows():
+                            cat_lbl = str(cs.get('category', ''))
+                            if 'stage' in cs and cs['stage']:
+                                cat_lbl += f" · {cs['stage']}"
+                            st.write(f"  {cat_lbl}：NT$ {cs['amount']:,.0f}")
                     st.markdown("---")
                     grp_cols = ['date', 'category', 'stage', 'item', 'qty', 'price', 'amount', 'note']
                     grp_rename = {'date': '日期', 'category': '類別', 'stage': '階段',
@@ -2173,8 +2182,12 @@ elif page == "💰 工資管理":
         st.markdown("---")
         st.markdown(f"##### 產品目錄（共 {len(df_cat2)} 項）")
         if not df_cat2.empty:
-            display_cat = df_cat2[['name', 'wageMake', 'wagePack', 'wageShip', 'wageSvc']].copy()
-            display_cat.columns = ['產品名稱', '製造/件', '包裝/件', '出貨/件', '服務費/件']
+            cat_disp_cols = ['name', 'wageMake', 'wagePack', 'wageShip', 'wageSvc', 'empMake', 'empPack', 'empShip']
+            cat_disp_rename = {'name': '產品名稱', 'wageMake': '製造/件', 'wagePack': '包裝/件',
+                               'wageShip': '出貨/件', 'wageSvc': '服務費/件',
+                               'empMake': '製造負責人', 'empPack': '包裝負責人', 'empShip': '出貨負責人'}
+            cat_exist = [c for c in cat_disp_cols if c in df_cat2.columns]
+            display_cat = df_cat2[cat_exist].rename(columns=cat_disp_rename)
             st.dataframe(display_cat, use_container_width=True, hide_index=True)
 
             st.markdown("##### 刪除產品")
