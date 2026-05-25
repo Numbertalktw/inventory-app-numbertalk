@@ -888,6 +888,167 @@ def render_history_table(doc_type_filter=None):
         st.divider()
 
 # ==========================================
+# 3.8 工資管理（整合自 wage-app）
+# ==========================================
+
+DEFAULT_WAGE_CATALOG = [
+    {"name": "光之鹽語 - 光之鹽語禮盒",     "wageMake": 52,   "wagePack": 6,    "wageShip": 10, "wageSvc": 0},
+    {"name": "艾草包10入",                    "wageMake": 0,    "wagePack": 10,   "wageShip": 10, "wageSvc": 0},
+    {"name": "艾草包5入",                     "wageMake": 0,    "wagePack": 5,    "wageShip": 10, "wageSvc": 0},
+    {"name": "脈輪淨化蠟燭組 - 9入",          "wageMake": 45,   "wagePack": 4.5,  "wageShip": 10, "wageSvc": 0},
+    {"name": "光之鹽語 - 單購魔法鹽",          "wageMake": 24,   "wagePack": 4,    "wageShip": 10, "wageSvc": 0},
+    {"name": "大淨化包",                       "wageMake": 24,   "wagePack": 3,    "wageShip": 10, "wageSvc": 0},
+    {"name": "大淨化包｜三日快速顯化儀式 - 代點顯化蠟燭", "wageMake": 24, "wagePack": 3, "wageShip": 0, "wageSvc": 250},
+    {"name": "顯化蠟燭2入",                   "wageMake": 10,   "wagePack": 1,    "wageShip": 10, "wageSvc": 0},
+    {"name": "顯化蠟燭｜代點服務",             "wageMake": 10,   "wagePack": 1,    "wageShip": 0,  "wageSvc": 200},
+    {"name": "2026 馬上成功・人財貴圓滿組",    "wageMake": 48,   "wagePack": 6,    "wageShip": 10, "wageSvc": 0},
+    {"name": "28天脈輪能量日常守護組",          "wageMake": 152,  "wagePack": 16,   "wageShip": 10, "wageSvc": 0},
+    {"name": "數字水晶手鍊(細)",               "wageMake": 50,   "wagePack": 0,    "wageShip": 10, "wageSvc": 0},
+    {"name": "數字水晶手鍊(粗)",               "wageMake": 100,  "wagePack": 0,    "wageShip": 10, "wageSvc": 0},
+    {"name": "生命數字能量項鍊(鈦鋼), 項鍊整組","wageMake": 200, "wagePack": 0,    "wageShip": 10, "wageSvc": 0},
+    {"name": "銅鑼浴",                         "wageMake": 0,    "wagePack": 0,    "wageShip": 0,  "wageSvc": 450},
+    {"name": "生命靈數解盤服務",               "wageMake": 0,    "wagePack": 0,    "wageShip": 0,  "wageSvc": 2520},
+    {"name": "【清明節氣祈福組 】- 家族能量清理與內在小孩療癒 - 老師代點", "wageMake": 24, "wagePack": 3, "wageShip": 0, "wageSvc": 250},
+]
+
+WAGE_STAGES = ["製造", "包裝", "出貨", "服務費"]
+
+def ensure_wage_sheets():
+    """確保工資相關工作表存在"""
+    ws_employees = get_worksheet("WageEmployees")
+    if not ws_employees.row_values(1):
+        ws_employees.append_row(["id", "name", "multProd"])
+        # 預設員工
+        import uuid
+        for emp in [("James", 1), ("千畇", 1), ("Imeng", 1)]:
+            ws_employees.append_row([str(uuid.uuid4())[:8], emp[0], emp[1]])
+
+    ws_catalog = get_worksheet("WageCatalog")
+    if not ws_catalog.row_values(1):
+        ws_catalog.append_row(["name", "wageMake", "wagePack", "wageShip", "wageSvc"])
+        for p in DEFAULT_WAGE_CATALOG:
+            ws_catalog.append_row([p["name"], p["wageMake"], p["wagePack"], p["wageShip"], p["wageSvc"]])
+
+    ws_entries = get_worksheet("WageEntries")
+    if not ws_entries.row_values(1):
+        ws_entries.append_row(["id", "date", "employee_name", "category", "stage", "item", "qty", "price", "amount", "note", "created_by", "created_at"])
+
+    ws_settle = get_worksheet("WageSettlements")
+    if not ws_settle.row_values(1):
+        ws_settle.append_row(["year_month", "settled_at", "total"])
+
+def load_wage_employees():
+    df = load_data("WageEmployees")
+    if df.empty or 'name' not in df.columns:
+        return pd.DataFrame(columns=["id", "name", "multProd"])
+    return df
+
+def load_wage_catalog():
+    df = load_data("WageCatalog")
+    if df.empty or 'name' not in df.columns:
+        return pd.DataFrame(DEFAULT_WAGE_CATALOG)
+    for col in ["wageMake", "wagePack", "wageShip", "wageSvc"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+    return df
+
+def load_wage_entries(year_month=None):
+    df = load_data("WageEntries")
+    if df.empty or 'date' not in df.columns:
+        return pd.DataFrame(columns=["id", "date", "employee_name", "category", "stage", "item", "qty", "price", "amount", "note"])
+    for col in ["qty", "price", "amount"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+    if year_month:
+        df = df[df['date'].astype(str).str.startswith(year_month)]
+    return df
+
+def load_wage_settlements():
+    df = load_data("WageSettlements")
+    if df.empty or 'year_month' not in df.columns:
+        return {}
+    return dict(zip(df['year_month'].astype(str), df['settled_at'].astype(str)))
+
+def add_wage_entry(date_str, employee_name, category, stage, item, qty, price, amount, note, created_by=""):
+    import uuid, datetime as dt
+    entry_id = str(uuid.uuid4())[:8]
+    created_at = dt.datetime.now().isoformat()
+    ws = get_worksheet_for_write("WageEntries")
+    ws.append_row([entry_id, date_str, employee_name, category, stage or "", item, qty or "", price or "", amount, note, created_by, created_at])
+    clear_cache()
+    return True
+
+def delete_wage_entry(entry_id):
+    ws = get_worksheet_for_write("WageEntries")
+    data = ws.get_all_values()
+    for i, row in enumerate(data[1:], start=2):
+        if row and row[0] == entry_id:
+            ws.delete_rows(i)
+            clear_cache()
+            return True
+    return False
+
+def save_wage_employee(name, mult_prod=1):
+    import uuid
+    ws = get_worksheet_for_write("WageEmployees")
+    data = ws.get_all_values()
+    for i, row in enumerate(data[1:], start=2):
+        if row and row[1] == name:
+            ws.update(f"C{i}", [[mult_prod]])
+            clear_cache()
+            return True
+    emp_id = str(uuid.uuid4())[:8]
+    ws.append_row([emp_id, name, mult_prod])
+    clear_cache()
+    return True
+
+def delete_wage_employee(name):
+    ws = get_worksheet_for_write("WageEmployees")
+    data = ws.get_all_values()
+    for i, row in enumerate(data[1:], start=2):
+        if row and row[1] == name:
+            ws.delete_rows(i)
+            clear_cache()
+            return True
+    return False
+
+def save_wage_product(product_name, wage_make=0, wage_pack=0, wage_ship=0, wage_svc=0):
+    ws = get_worksheet_for_write("WageCatalog")
+    data = ws.get_all_values()
+    for i, row in enumerate(data[1:], start=2):
+        if row and row[0] == product_name:
+            ws.update(f"B{i}:E{i}", [[wage_make, wage_pack, wage_ship, wage_svc]])
+            clear_cache()
+            return True
+    ws.append_row([product_name, wage_make, wage_pack, wage_ship, wage_svc])
+    clear_cache()
+    return True
+
+def delete_wage_product(product_name):
+    ws = get_worksheet_for_write("WageCatalog")
+    data = ws.get_all_values()
+    for i, row in enumerate(data[1:], start=2):
+        if row and row[0] == product_name:
+            ws.delete_rows(i)
+            clear_cache()
+            return True
+    return False
+
+def mark_wage_settlement(year_month, total):
+    import datetime as dt
+    ws = get_worksheet_for_write("WageSettlements")
+    data = ws.get_all_values()
+    settled_at = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+    for i, row in enumerate(data[1:], start=2):
+        if row and row[0] == year_month:
+            ws.update(f"B{i}:C{i}", [[settled_at, total]])
+            clear_cache()
+            return True
+    ws.append_row([year_month, settled_at, total])
+    clear_cache()
+    return True
+
+# ==========================================
 # 4. 主程式分頁
 # ==========================================
 st.set_page_config(page_title=PAGE_TITLE, layout="wide", page_icon="💎")
@@ -896,7 +1057,7 @@ ensure_price_column()
 
 with st.sidebar:
     st.header("功能選單")
-    page = st.radio("前往", ["🛒 訂單管理", "👥 會員管理", "🔨 製造作業", "🚚 出貨作業", "📦 商品管理", "📥 進貨作業", "📦 移庫作業", "📊 報表查詢"])
+    page = st.radio("前往", ["🛒 訂單管理", "👥 會員管理", "🔨 製造作業", "🚚 出貨作業", "📦 商品管理", "📥 進貨作業", "📦 移庫作業", "📊 報表查詢", "💰 工資管理"])
     if st.button("刷新資料"):
         clear_cache()
         st.rerun()
@@ -1631,3 +1792,241 @@ elif page == "📊 報表查詢":
     if not df.empty:
         st.dataframe(df, use_container_width=True)
         st.download_button("下載 CSV", df.to_csv(index=False).encode('utf-8-sig'), f"Stock_{date.today()}.csv", "text/csv")
+
+# --- 💰 工資管理 ---
+elif page == "💰 工資管理":
+    st.subheader("💰 工資管理系統")
+    ensure_wage_sheets()
+
+    today_str = date.today().isoformat()
+    cur_ym = today_str[:7]  # e.g. "2026-05"
+
+    tab_entry, tab_report, tab_employees, tab_catalog = st.tabs(
+        ["📝 工資登錄", "📊 月度報表", "👷 員工管理", "📋 產品目錄"]
+    )
+
+    # ── 工資登錄 ──────────────────────────────────────────────────
+    with tab_entry:
+        st.markdown("##### 新增工資紀錄")
+        df_emp = load_wage_employees()
+        df_cat = load_wage_catalog()
+
+        emp_names = df_emp['name'].tolist() if not df_emp.empty else []
+        prod_names = df_cat['name'].tolist() if not df_cat.empty else []
+
+        with st.form("wage_entry_form", clear_on_submit=True):
+            wc1, wc2, wc3 = st.columns(3)
+            w_date = wc1.date_input("日期", value=date.today())
+            w_emp = wc2.selectbox("員工", emp_names if emp_names else ["（請先新增員工）"])
+            w_cat = wc3.selectbox("工資類別", ["產品", "其他"])
+
+            if w_cat == "產品":
+                ws1, ws2 = st.columns(2)
+                w_stage = ws1.selectbox("工作階段", WAGE_STAGES)
+                w_item = ws2.selectbox("產品", prod_names if prod_names else ["（請先新增產品）"])
+
+                # 自動帶入單價（含員工倍率）
+                default_price = 0.0
+                if prod_names and w_item in df_cat['name'].values:
+                    row_p = df_cat[df_cat['name'] == w_item].iloc[0]
+                    stage_col = {"製造": "wageMake", "包裝": "wagePack", "出貨": "wageShip", "服務費": "wageSvc"}.get(w_stage, "wageMake")
+                    base = float(row_p.get(stage_col, 0) or 0)
+                    if not df_emp.empty and w_emp in df_emp['name'].values:
+                        mult = float(df_emp[df_emp['name'] == w_emp].iloc[0].get('multProd', 1) or 1)
+                    else:
+                        mult = 1.0
+                    default_price = round(base * mult, 2)
+
+                wp1, wp2 = st.columns(2)
+                w_qty = wp1.number_input("數量", min_value=0.01, value=1.0, step=0.5)
+                w_price = wp2.number_input("單價 (元)", min_value=0.0, value=default_price, step=5.0)
+                w_amount = w_qty * w_price
+                st.info(f"💵 金額小計：NT$ {w_amount:,.2f}")
+                w_custom_name = ""
+                w_direct_amount = 0.0
+            else:
+                w_custom_name = st.text_input("自訂項目名稱")
+                w_direct_amount = st.number_input("金額 (元)", min_value=0.0, value=0.0, step=10.0)
+                w_stage = ""
+                w_item = ""
+                w_qty = 0.0
+                w_price = 0.0
+                w_amount = w_direct_amount
+
+            w_note = st.text_input("備註（選填）")
+            w_creator = st.selectbox("登錄人", KEYERS)
+
+            if st.form_submit_button("✅ 新增紀錄", use_container_width=True):
+                if not emp_names:
+                    st.error("請先到「員工管理」新增員工")
+                elif w_cat == "其他" and not w_custom_name.strip():
+                    st.error("請填寫自訂項目名稱")
+                else:
+                    item_name = w_item if w_cat == "產品" else w_custom_name.strip()
+                    qty_val = w_qty if w_cat == "產品" else None
+                    price_val = w_price if w_cat == "產品" else None
+                    if add_wage_entry(w_date.isoformat(), w_emp, w_cat, w_stage, item_name, qty_val, price_val, w_amount, w_note, w_creator):
+                        st.success("工資紀錄已新增！")
+                        time.sleep(1)
+                        st.rerun()
+
+        st.markdown("---")
+        st.markdown(f"##### 本月紀錄（{cur_ym}）")
+        df_this = load_wage_entries(cur_ym)
+        if df_this.empty:
+            st.info("本月尚無工資紀錄")
+        else:
+            total_this = df_this['amount'].sum()
+            st.markdown(f"共 **{len(df_this)}** 筆　合計 **NT$ {total_this:,.0f}**")
+            for _, er in df_this.sort_values('date', ascending=False).iterrows():
+                ec1, ec2, ec3, ec4, ec5, ec6 = st.columns([1.5, 1.5, 2, 2, 1.2, 0.8])
+                ec1.text(str(er.get('date', '')))
+                ec2.text(str(er.get('employee_name', '')))
+                cat_txt = str(er.get('category', ''))
+                stg_txt = str(er.get('stage', ''))
+                ec3.text(f"{cat_txt}{' · ' + stg_txt if stg_txt else ''}")
+                ec4.text(str(er.get('item', '')))
+                ec5.text(f"NT$ {float(er.get('amount', 0)):,.0f}")
+                if ec6.button("🗑️", key=f"wage_del_{er.get('id', '')}"):
+                    if delete_wage_entry(str(er.get('id', ''))):
+                        st.success("已刪除")
+                        time.sleep(1)
+                        st.rerun()
+            st.divider()
+            # 匯出 CSV
+            csv_data = df_this[['date', 'employee_name', 'category', 'stage', 'item', 'qty', 'price', 'amount', 'note']].copy()
+            csv_data.columns = ['日期', '員工', '類別', '階段', '項目', '數量', '單價', '金額', '備註']
+            st.download_button("⬇️ 匯出本月 CSV", csv_data.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig'),
+                               f"工資報表_{cur_ym}.csv", "text/csv")
+
+    # ── 月度報表 ──────────────────────────────────────────────────
+    with tab_report:
+        st.markdown("##### 選擇月份")
+        import datetime as _dt
+        rpt_ym = st.text_input("年月（YYYY-MM）", value=cur_ym, max_chars=7)
+
+        df_rpt = load_wage_entries(rpt_ym)
+        settlements = load_wage_settlements()
+        is_settled = rpt_ym in settlements
+
+        if df_rpt.empty:
+            st.info(f"**{rpt_ym}** 尚無工資紀錄")
+        else:
+            grand_total = df_rpt['amount'].sum()
+            st.markdown(f"#### {rpt_ym} 工資彙總　合計 **NT$ {grand_total:,.0f}**")
+
+            if is_settled:
+                st.success(f"✅ 已於 {settlements[rpt_ym][:10]} 結算")
+            else:
+                st.warning("⚠️ 本月尚未結算")
+
+            # 按員工分組
+            for emp_name, grp in df_rpt.groupby('employee_name'):
+                with st.expander(f"👷 {emp_name}　NT$ {grp['amount'].sum():,.0f}"):
+                    cat_summary = grp.groupby(['category', 'stage'])['amount'].sum().reset_index()
+                    for _, cs in cat_summary.iterrows():
+                        cat_lbl = str(cs['category']) + (f" · {cs['stage']}" if cs['stage'] else "")
+                        st.write(f"  {cat_lbl}：NT$ {cs['amount']:,.0f}")
+                    st.markdown("---")
+                    st.dataframe(
+                        grp[['date', 'category', 'stage', 'item', 'qty', 'price', 'amount', 'note']].rename(
+                            columns={'date': '日期', 'category': '類別', 'stage': '階段',
+                                     'item': '項目', 'qty': '數量', 'price': '單價',
+                                     'amount': '金額', 'note': '備註'}),
+                        use_container_width=True, hide_index=True
+                    )
+
+            st.divider()
+            if not is_settled:
+                if st.button(f"✅ 標記 {rpt_ym} 為已結算", type="primary", use_container_width=True):
+                    if mark_wage_settlement(rpt_ym, grand_total):
+                        st.success(f"已標記 {rpt_ym} 結算，總額 NT$ {grand_total:,.0f}")
+                        time.sleep(1)
+                        st.rerun()
+            else:
+                st.info(f"此月份已結算（NT$ {grand_total:,.0f}）")
+
+            csv_rpt = df_rpt[['date', 'employee_name', 'category', 'stage', 'item', 'qty', 'price', 'amount', 'note']].copy()
+            csv_rpt.columns = ['日期', '員工', '類別', '階段', '項目', '數量', '單價', '金額', '備註']
+            st.download_button("⬇️ 匯出報表 CSV", csv_rpt.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig'),
+                               f"工資報表_{rpt_ym}.csv", "text/csv")
+
+    # ── 員工管理 ──────────────────────────────────────────────────
+    with tab_employees:
+        st.markdown("##### 新增 / 更新員工")
+        with st.form("add_emp_form", clear_on_submit=True):
+            ae1, ae2, ae3 = st.columns([2, 1, 1])
+            ae_name = ae1.text_input("員工姓名 *必填")
+            ae_mult = ae2.number_input("工資倍率", min_value=0.1, value=1.0, step=0.1,
+                                        help="套用在所有產品基本工資上的倍率，預設 1.0")
+            if st.form_submit_button("儲存員工", use_container_width=True):
+                if not ae_name.strip():
+                    st.error("請填寫員工姓名")
+                else:
+                    save_wage_employee(ae_name.strip(), ae_mult)
+                    st.success(f"員工 {ae_name.strip()} 已儲存")
+                    time.sleep(1)
+                    st.rerun()
+
+        st.markdown("---")
+        df_emp2 = load_wage_employees()
+        if df_emp2.empty:
+            st.info("尚無員工，請新增")
+        else:
+            st.markdown(f"共 **{len(df_emp2)}** 位員工")
+            for _, er in df_emp2.iterrows():
+                emc1, emc2, emc3 = st.columns([3, 2, 1])
+                emc1.write(f"**{er.get('name', '')}**")
+                emc2.write(f"倍率：{er.get('multProd', 1)}")
+                if emc3.button("刪除", key=f"del_emp_{er.get('id', er.get('name', ''))}"):
+                    if delete_wage_employee(str(er.get('name', ''))):
+                        st.success("已刪除")
+                        time.sleep(1)
+                        st.rerun()
+
+    # ── 產品目錄 ──────────────────────────────────────────────────
+    with tab_catalog:
+        st.markdown("##### 新增 / 編輯產品工資")
+        df_cat2 = load_wage_catalog()
+        prod_list2 = df_cat2['name'].tolist() if not df_cat2.empty else []
+        edit_mode = st.selectbox("選擇已有產品編輯（或留空新增）", ["（新增產品）"] + prod_list2)
+
+        default_vals = {"wageMake": 0.0, "wagePack": 0.0, "wageShip": 0.0, "wageSvc": 0.0}
+        default_name = ""
+        if edit_mode != "（新增產品）" and not df_cat2.empty:
+            row_e = df_cat2[df_cat2['name'] == edit_mode]
+            if not row_e.empty:
+                default_name = edit_mode
+                for k in default_vals:
+                    default_vals[k] = float(row_e.iloc[0].get(k, 0) or 0)
+
+        with st.form("prod_wage_form", clear_on_submit=False):
+            cp_name = st.text_input("產品名稱 *必填", value=default_name)
+            cp1, cp2, cp3, cp4 = st.columns(4)
+            cp_make = cp1.number_input("製造工資/件", min_value=0.0, value=default_vals["wageMake"], step=1.0)
+            cp_pack = cp2.number_input("包裝工資/件", min_value=0.0, value=default_vals["wagePack"], step=1.0)
+            cp_ship = cp3.number_input("出貨工資/件", min_value=0.0, value=default_vals["wageShip"], step=1.0)
+            cp_svc  = cp4.number_input("服務費/件",  min_value=0.0, value=default_vals["wageSvc"],  step=10.0)
+            if st.form_submit_button("💾 儲存產品", use_container_width=True):
+                if not cp_name.strip():
+                    st.error("請填寫產品名稱")
+                else:
+                    save_wage_product(cp_name.strip(), cp_make, cp_pack, cp_ship, cp_svc)
+                    st.success(f"產品「{cp_name.strip()}」已儲存")
+                    time.sleep(1)
+                    st.rerun()
+
+        st.markdown("---")
+        st.markdown(f"##### 產品目錄（共 {len(df_cat2)} 項）")
+        if not df_cat2.empty:
+            display_cat = df_cat2[['name', 'wageMake', 'wagePack', 'wageShip', 'wageSvc']].copy()
+            display_cat.columns = ['產品名稱', '製造/件', '包裝/件', '出貨/件', '服務費/件']
+            st.dataframe(display_cat, use_container_width=True, hide_index=True)
+
+            st.markdown("##### 刪除產品")
+            del_prod = st.selectbox("選擇要刪除的產品", prod_list2, key="del_prod_sel")
+            if st.button("🗑️ 刪除此產品", key="del_prod_btn"):
+                if delete_wage_product(del_prod):
+                    st.success(f"已刪除「{del_prod}」")
+                    time.sleep(1)
+                    st.rerun()
