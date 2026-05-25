@@ -914,28 +914,58 @@ DEFAULT_WAGE_CATALOG = [
 WAGE_STAGES = ["製造", "包裝", "出貨", "服務費"]
 
 def ensure_wage_sheets():
-    """確保工資相關工作表存在"""
-    ws_employees = get_worksheet("WageEmployees")
-    if not ws_employees.row_values(1):
-        ws_employees.append_row(["id", "name", "multProd"])
-        # 預設員工
-        import uuid
-        for emp in [("James", 1), ("千畇", 1), ("Imeng", 1)]:
-            ws_employees.append_row([str(uuid.uuid4())[:8], emp[0], emp[1]])
+    """確保工資相關工作表存在，不存在則自動建立"""
+    import uuid as _uuid
+    sh = get_spreadsheet()
+    if not sh:
+        st.error("無法連接 Google Sheets，請確認設定")
+        return
 
-    ws_catalog = get_worksheet("WageCatalog")
-    if not ws_catalog.row_values(1):
-        ws_catalog.append_row(["name", "wageMake", "wagePack", "wageShip", "wageSvc"])
+    existing_titles = [ws.title for ws in sh.worksheets()]
+
+    # WageEmployees
+    if "WageEmployees" not in existing_titles:
+        ws_emp = sh.add_worksheet(title="WageEmployees", rows=200, cols=5)
+        ws_emp.append_row(["id", "name", "multProd"])
+        for emp_name, mult in [("James", 1), ("千畇", 1), ("Imeng", 1)]:
+            ws_emp.append_row([str(_uuid.uuid4())[:8], emp_name, mult])
+    else:
+        ws_emp = sh.worksheet("WageEmployees")
+        if not ws_emp.row_values(1):
+            ws_emp.append_row(["id", "name", "multProd"])
+
+    # WageCatalog
+    if "WageCatalog" not in existing_titles:
+        ws_cat = sh.add_worksheet(title="WageCatalog", rows=200, cols=6)
+        ws_cat.append_row(["name", "wageMake", "wagePack", "wageShip", "wageSvc"])
         for p in DEFAULT_WAGE_CATALOG:
-            ws_catalog.append_row([p["name"], p["wageMake"], p["wagePack"], p["wageShip"], p["wageSvc"]])
+            ws_cat.append_row([p["name"], p["wageMake"], p["wagePack"], p["wageShip"], p["wageSvc"]])
+    else:
+        ws_cat = sh.worksheet("WageCatalog")
+        if not ws_cat.row_values(1):
+            ws_cat.append_row(["name", "wageMake", "wagePack", "wageShip", "wageSvc"])
+            for p in DEFAULT_WAGE_CATALOG:
+                ws_cat.append_row([p["name"], p["wageMake"], p["wagePack"], p["wageShip"], p["wageSvc"]])
 
-    ws_entries = get_worksheet("WageEntries")
-    if not ws_entries.row_values(1):
-        ws_entries.append_row(["id", "date", "employee_name", "category", "stage", "item", "qty", "price", "amount", "note", "created_by", "created_at"])
+    # WageEntries
+    if "WageEntries" not in existing_titles:
+        ws_ent = sh.add_worksheet(title="WageEntries", rows=2000, cols=13)
+        ws_ent.append_row(["id", "date", "employee_name", "category", "stage", "item", "qty", "price", "amount", "note", "created_by", "created_at"])
+    else:
+        ws_ent = sh.worksheet("WageEntries")
+        if not ws_ent.row_values(1):
+            ws_ent.append_row(["id", "date", "employee_name", "category", "stage", "item", "qty", "price", "amount", "note", "created_by", "created_at"])
 
-    ws_settle = get_worksheet("WageSettlements")
-    if not ws_settle.row_values(1):
-        ws_settle.append_row(["year_month", "settled_at", "total"])
+    # WageSettlements
+    if "WageSettlements" not in existing_titles:
+        ws_set = sh.add_worksheet(title="WageSettlements", rows=100, cols=4)
+        ws_set.append_row(["year_month", "settled_at", "total"])
+    else:
+        ws_set = sh.worksheet("WageSettlements")
+        if not ws_set.row_values(1):
+            ws_set.append_row(["year_month", "settled_at", "total"])
+
+    clear_cache()
 
 def load_wage_employees():
     df = load_data("WageEmployees")
