@@ -2003,7 +2003,7 @@ elif page == "💰 工資管理":
         else:
             total_this = df_this['amount'].sum()
             st.markdown(f"共 **{len(df_this)}** 筆　合計 **NT$ {total_this:,.0f}**")
-            for _, er in df_this.sort_values('date', ascending=False).iterrows():
+            for w_idx, (_, er) in enumerate(df_this.sort_values('date', ascending=False).iterrows()):
                 ec1, ec2, ec3, ec4, ec5, ec6 = st.columns([1.5, 1.5, 2, 2, 1.2, 0.8])
                 ec1.text(str(er.get('date', '')))
                 ec2.text(str(er.get('employee_name', '')))
@@ -2012,7 +2012,7 @@ elif page == "💰 工資管理":
                 ec3.text(f"{cat_txt}{' · ' + stg_txt if stg_txt else ''}")
                 ec4.text(str(er.get('item', '')))
                 ec5.text(f"NT$ {float(er.get('amount', 0)):,.0f}")
-                if ec6.button("🗑️", key=f"wage_del_{er.get('id', '')}"):
+                if ec6.button("🗑️", key=f"wage_del_{w_idx}_{er.get('id', '')}"):
                     if delete_wage_entry(str(er.get('id', ''))):
                         st.success("已刪除")
                         time.sleep(1)
