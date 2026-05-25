@@ -731,6 +731,29 @@ def delete_member(name):
     except Exception:
         return False
 
+def sync_members_from_orders():
+    """從所有訂單中提取客戶資料，自動匯入會員名單（不覆蓋已有會員）"""
+    df_orders = load_orders()
+    if df_orders.empty:
+        return 0
+    existing_members = load_members()
+    existing_names = set(existing_members['name'].astype(str).tolist()) if not existing_members.empty else set()
+    count = 0
+    seen = set()
+    for _, row in df_orders.iterrows():
+        name = str(row.get('customer_name', '')).strip()
+        if not name or name in seen or name in existing_names:
+            continue
+        seen.add(name)
+        phone = str(row.get('customer_phone', ''))
+        email = str(row.get('customer_email', ''))
+        addr = str(row.get('shipping_address', ''))
+        bday = str(row.get('birthday', ''))
+        lbday = str(row.get('lunar_birthday', ''))
+        save_member(name, phone, email, addr, birthday=bday, lunar_birthday=lbday)
+        count += 1
+    return count
+
 # ==========================================
 # 3.7 歷史紀錄顯示
 # ==========================================
@@ -1329,6 +1352,15 @@ elif page == "👥 會員管理":
     tab_m_list, tab_m_add = st.tabs(["📋 會員列表", "手動新增會員"])
 
     with tab_m_list:
+        # 從訂單同步會員按鈕
+        if st.button("🔄 從訂單同步客戶到會員名單", use_container_width=True):
+            count = sync_members_from_orders()
+            if count > 0:
+                st.success(f"已從訂單匯入 {count} 位新會員")
+                time.sleep(1)
+                st.rerun()
+            else:
+                st.info("沒有新的客戶需要匯入（全部已存在或無訂單）")
         df_members = load_members()
         if df_members.empty:
             st.info("目前沒有任何會員，建立訂單時會自動儲存客戶為會員。")
