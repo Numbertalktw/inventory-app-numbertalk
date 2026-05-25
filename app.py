@@ -2057,11 +2057,13 @@ elif page == "💰 工資管理":
                         cat_lbl = str(cs['category']) + (f" · {cs['stage']}" if cs['stage'] else "")
                         st.write(f"  {cat_lbl}：NT$ {cs['amount']:,.0f}")
                     st.markdown("---")
+                    grp_cols = ['date', 'category', 'stage', 'item', 'qty', 'price', 'amount', 'note']
+                    grp_rename = {'date': '日期', 'category': '類別', 'stage': '階段',
+                                  'item': '項目', 'qty': '數量', 'price': '單價',
+                                  'amount': '金額', 'note': '備註'}
+                    grp_exist = [c for c in grp_cols if c in grp.columns]
                     st.dataframe(
-                        grp[['date', 'category', 'stage', 'item', 'qty', 'price', 'amount', 'note']].rename(
-                            columns={'date': '日期', 'category': '類別', 'stage': '階段',
-                                     'item': '項目', 'qty': '數量', 'price': '單價',
-                                     'amount': '金額', 'note': '備註'}),
+                        grp[grp_exist].rename(columns=grp_rename),
                         use_container_width=True, hide_index=True
                     )
 
