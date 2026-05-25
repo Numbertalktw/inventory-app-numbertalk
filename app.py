@@ -425,19 +425,19 @@ def ensure_extra_columns():
         return
     try:
         for sheet_name in ["Orders", "Members"]:
-            ws = get_worksheet(sheet_name)
-            if not ws:
+            ws_w = get_worksheet_for_write(sheet_name)
+            if not ws_w:
                 continue
-            header = ws.row_values(1)
-            missing = [c for c in ["birthday", "lunar_birthday", "birth_time"] if c not in header]
+            cur_header = ws_w.row_values(1)
+            missing = [c for c in ["birthday", "lunar_birthday", "birth_time"] if c not in cur_header]
             if missing:
-                ws_w = get_worksheet_for_write(sheet_name)
-                if ws_w:
-                    cur_header = ws_w.row_values(1)
-                    for col_name in missing:
-                        if col_name not in cur_header:
-                            ws_w.update_cell(1, len(cur_header) + 1, col_name)
-                            cur_header.append(col_name)
+                # 先擴展欄數，避免超出 grid limits
+                needed_total = len(cur_header) + len(missing)
+                if ws_w.col_count < needed_total:
+                    ws_w.resize(cols=needed_total + 5)
+                for col_name in missing:
+                    ws_w.update_cell(1, len(cur_header) + 1, col_name)
+                    cur_header.append(col_name)
         st.session_state['_extra_cols_ok'] = True
     except Exception:
         pass
@@ -576,9 +576,13 @@ def update_order_fields(order_no, fields_dict):
         all_vals = ws.get_all_values()
         header = all_vals[0]
         no_idx = header.index("order_no")
-        # 如果欄位不在 header，動態新增
-        for field_name in fields_dict.keys():
-            if field_name not in header:
+        # 如果欄位不在 header，動態新增（先擴展欄數）
+        missing_fields = [f for f in fields_dict.keys() if f not in header]
+        if missing_fields:
+            needed_total = len(header) + len(missing_fields)
+            if ws.col_count < needed_total:
+                ws.resize(cols=needed_total + 5)
+            for field_name in missing_fields:
                 ws.update_cell(1, len(header) + 1, field_name)
                 header.append(field_name)
         for i, row in enumerate(all_vals[1:], 2):
@@ -744,11 +748,15 @@ def save_member(name, phone, email, address, note="", birthday="", lunar_birthda
 
         # 確保欄位存在（只在缺少時才寫入）
         cols_added = False
-        for needed_col in ["birthday", "lunar_birthday", "birth_time"]:
-            if needed_col not in header:
+        missing = [c for c in ["birthday", "lunar_birthday", "birth_time"] if c not in header]
+        if missing:
+            needed_total = len(header) + len(missing)
+            if ws.col_count < needed_total:
+                ws.resize(cols=needed_total + 5)
+            for needed_col in missing:
                 ws.update_cell(1, len(header) + 1, needed_col)
                 header.append(needed_col)
-                cols_added = True
+            cols_added = True
         if cols_added:
             all_vals = ws.get_all_values()
             header = all_vals[0]
