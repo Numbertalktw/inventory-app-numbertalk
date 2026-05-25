@@ -568,6 +568,7 @@ def update_order_note(order_no, new_note):
 
 def update_order_fields(order_no, fields_dict):
     """更新訂單的多個欄位(客戶資訊、折扣、運費等)"""
+    ensure_extra_columns()
     ws = get_worksheet_for_write("Orders")
     if not ws:
         st.error("無法連線到 Orders 工作表")
@@ -576,6 +577,11 @@ def update_order_fields(order_no, fields_dict):
         all_vals = ws.get_all_values()
         header = all_vals[0]
         no_idx = header.index("order_no")
+        # 如果欄位不在 header，動態新增
+        for field_name in fields_dict.keys():
+            if field_name not in header:
+                ws.update_cell(1, len(header) + 1, field_name)
+                header.append(field_name)
         for i, row in enumerate(all_vals[1:], 2):
             if str(row[no_idx]) == str(order_no):
                 for field_name, field_value in fields_dict.items():
@@ -1197,7 +1203,10 @@ elif page == "🛒 訂單管理":
                                         'lunar_birthday': e_lbday,
                                         'birth_time': e_btime
                                     }):
-                                        st.success("客戶資訊已更新")
+                                        save_member(e_name, e_phone, e_email, e_addr,
+                                                    birthday=e_bday, lunar_birthday=e_lbday,
+                                                    birth_time=e_btime)
+                                        st.success("客戶資訊已更新（會員同步）")
                                         time.sleep(1)
                                         st.rerun()
                         with edit_price:
@@ -1361,7 +1370,10 @@ elif page == "🛒 訂單管理":
                                 'birth_time': e_btime
                             }
                             if update_order_fields(sel_ono, updates):
-                                st.success("客戶資訊已更新")
+                                save_member(e_name, e_phone, e_email, e_addr,
+                                            birthday=e_bday, lunar_birthday=e_lbday,
+                                            birth_time=e_btime)
+                                st.success("客戶資訊已更新（會員同步）")
                                 time.sleep(1)
                                 st.rerun()
 
