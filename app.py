@@ -4,7 +4,6 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import date, datetime
 import time
-import re
 
 # ==========================================
 # 1. 系統基礎設定
@@ -30,6 +29,98 @@ PREFIX_MAP = {
     "火漆章": "FS", "能量蠟燭": "LA", "香包": "SB", "水晶": "CT", "魔法鹽": "MS",
     "天然石": "NS", "金屬配件": "MT", "線材": "WR", "包裝材料": "PK", "完成品": "PD"
 }
+
+# ==========================================
+# 1.5 數字學計算工具（五階段數 / 流年）
+# ==========================================
+def _digit_sum(n):
+    return sum(int(d) for d in str(n))
+
+def _reduce_chain(n):
+    chain = [n]
+    while n >= 10:
+        n = _digit_sum(n)
+        chain.append(n)
+    return chain
+
+def calc_liunian(year, birth_month, birth_day):
+    """流年 = 年份所有數字 + 生日月 + 生日日，縮減"""
+    digits_str = str(year) + str(birth_month) + str(birth_day)
+    total = sum(int(d) for d in digits_str)
+    chain = _reduce_chain(total)
+    return "/".join(str(x) for x in chain)
+
+def calc_jieduan(birth_year, birth_month):
+    """階段數 = 出生年所有數字 + 生日月，縮減"""
+    digits_str = str(birth_year) + str(birth_month)
+    total = sum(int(d) for d in digits_str)
+    chain = _reduce_chain(total)
+    return "/".join(str(x) for x in chain)
+
+def personal_year_range(birth_month, birth_day, today=None):
+    """依生日是否已過決定三個年份"""
+    if today is None:
+        today = datetime.now().date()
+    birthday_passed = (today.month, today.day) >= (birth_month, birth_day)
+    personal_year = today.year if birthday_passed else today.year - 1
+    return [personal_year - 1, personal_year, personal_year + 1]
+
+def parse_birthday(bday_str):
+    """解析生日字串 YYYY/MM/DD 或 YYYY-MM-DD"""
+    if not bday_str or not str(bday_str).strip():
+        return None
+    for fmt in ("%Y/%m/%d", "%Y-%m-%d"):
+        try:
+            d = datetime.strptime(str(bday_str).strip(), fmt)
+            return d.year, d.month, d.day
+        except ValueError:
+            pass
+    return None
+
+def render_numerology_table(bday_str, lunar_bday_str="", key_prefix=""):
+    """顯示三年流年 x 階段數對照表（國曆 + 農曆並排）"""
+    parsed = parse_birthday(bday_str)
+    if not parsed:
+        st.info("請輸入生日（格式: YYYY/MM/DD）以顯示數字能量")
+        return False
+    by, bm, bd = parsed
+    years = personal_year_range(bm, bd)
+    labels = ["去年", "今年", "明年"]
+    jieduan = calc_jieduan(by, bm)
+    jd_final = jieduan.split("/")[-1]
+
+    lunar_parsed = parse_birthday(lunar_bday_str) if lunar_bday_str else None
+    lunar_jd_final = ""
+    lunar_jieduan = ""
+    if lunar_parsed:
+        ly, lm, ld = lunar_parsed
+        lunar_jieduan = calc_jieduan(ly, lm)
+        lunar_jd_final = lunar_jieduan.split("/")[-1]
+
+    col_solar, col_lunar = st.columns(2)
+    with col_solar:
+        st.markdown(f"**🌞 國曆階段數：** `{jd_final}` （{by}年 + {bm}月 → {jieduan}）")
+    with col_lunar:
+        if lunar_parsed:
+            st.markdown(f"**🌙 農曆階段數：** `{lunar_jd_final}` （{ly}年 + {lm}月 → {lunar_jieduan}）")
+        else:
+            st.markdown("**🌙 農曆階段數：** *未填寫農曆生日*")
+
+    rows = []
+    for yr, lbl in zip(years, labels):
+        ln = calc_liunian(yr, bm, bd)
+        ln_final = ln.split("/")[-1]
+        row_data = {
+            "年份": f"{yr}（{lbl}）",
+            "流年計算": f"{yr}年+{bm}月+{bd}日 → {ln}",
+            "流年數": ln_final,
+            "國曆階段數": jd_final,
+        }
+        if lunar_parsed:
+            row_data["農曆階段數"] = lunar_jd_final
+        rows.append(row_data)
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    return True
 
 # ==========================================
 # 2. Google Sheet 連線核心
@@ -304,7 +395,7 @@ def ensure_order_sheets():
             ws.append_row(["order_no", "order_date", "customer_name", "customer_phone",
                            "customer_email", "shipping_address", "status", "total_amount",
                            "note", "created_by", "created_at", "discount", "shipping_fee",
-                           "items_total"])
+                           "items_total", "birthday", "lunar_birthday"])
         if "OrderItems" not in existing:
             ws = sh.add_worksheet(title="OrderItems", rows=5000, cols=8)
             ws.append_row(["order_no", "sku", "product_name", "qty", "unit_price",
@@ -319,7 +410,7 @@ def generate_order_no():
 
 def create_order(order_no, order_date, customer_name, customer_phone,
                  customer_email, shipping_address, items, note, created_by,
-                 discount=0, shipping_fee=0):
+                 discount=0, shipping_fee=0, birthday="", lunar_birthday=""):
     ensure_order_sheets()
     ws_orders = get_worksheet_for_write("Orders")
     ws_items = get_worksheet_for_write("OrderItems")
@@ -329,11 +420,12 @@ def create_order(order_no, order_date, customer_name, customer_phone,
         items_total = sum(item['subtotal'] for item in items)
         total = items_total - float(discount) + float(shipping_fee)
         ws_orders.append_row([
-            order_no, str(order_date), customer_name, phone_as_text(customer_phone),
+            order_no, str(order_date), customer_name, customer_phone,
             customer_email, shipping_address, "已確認", float(total),
             note, created_by, str(datetime.now()),
-            float(discount), float(shipping_fee), float(items_total)
-        ], value_input_option='USER_ENTERED')
+            float(discount), float(shipping_fee), float(items_total),
+            str(birthday), str(lunar_birthday)
+        ])
         for item in items:
             ws_items.append_row([
                 order_no, item['sku'], item['product_name'],
@@ -341,7 +433,8 @@ def create_order(order_no, order_date, customer_name, customer_phone,
                 float(item['subtotal']), item['warehouse']
             ])
         clear_cache()
-        save_member(customer_name, customer_phone, customer_email, shipping_address)
+        save_member(customer_name, customer_phone, customer_email, shipping_address,
+                    birthday=birthday, lunar_birthday=lunar_birthday)
         return True, f"訂單 {order_no} 建立成功"
     except Exception as e:
         return False, f"建立失敗: {e}"
@@ -359,6 +452,9 @@ def load_orders():
         if col not in df.columns:
             df[col] = 0
         df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+    for col in ['birthday', 'lunar_birthday']:
+        if col not in df.columns:
+            df[col] = ""
     return df
 
 def load_order_items(order_no=None):
@@ -495,13 +591,7 @@ def recalc_order_total(order_no, discount=0, shipping_fee=0):
         'shipping_fee': float(shipping_fee)
     })
 
-def ship_order(order_no, keyer, ship_method="", ship_no="",
-               target_status="未付款/已出貨", stage_keyers=None, created_by=None):
-    """執行出貨:扣庫存 + 更新狀態 + (若有 stage_keyers) 同步產生工資紀錄。
-
-    stage_keyers 範例: {'make': 'James', 'pack': '千畇', 'ship': 'Imeng', 'svc': ''}
-    任一階段填空字串 → 該階段不計薪。
-    """
+def ship_order(order_no, keyer, ship_method="", ship_no="", target_status="未付款/已出貨"):
     items = load_order_items(order_no)
     if items.empty:
         return False, "找不到訂單品項"
@@ -514,21 +604,9 @@ def ship_order(order_no, keyer, ship_method="", ship_no="",
         )
         if not ok:
             return False, f"品項 {item['sku']} 出貨失敗"
-    if not update_order_status(order_no, target_status):
-        return False, "出貨紀錄已建立但狀態更新失敗"
-
-    # 連動工資 ─ 出貨時即時產生工資紀錄
-    wage_msg = ""
-    if stage_keyers and any(stage_keyers.values()):
-        items_list = items.to_dict('records')
-        created, skipped, _msgs = create_wage_entries_for_items(
-            items_list, stage_keyers, order_no, created_by or keyer
-        )
-        if created > 0:
-            wage_msg = f",已連動產生 {created} 筆工資紀錄"
-        if skipped > 0:
-            wage_msg += f"({skipped} 筆商品未對應工資設定,已跳過)"
-    return True, f"出貨完成,庫存已扣除{wage_msg}"
+    if update_order_status(order_no, target_status):
+        return True, "出貨完成，庫存已扣除"
+    return False, "出貨紀錄已建立但狀態更新失敗"
 
 def delete_order(order_no):
     ws_orders = get_worksheet_for_write("Orders")
@@ -553,10 +631,6 @@ def delete_order(order_no):
 # 3.6 會員名單核心功能
 # ==========================================
 
-# Members 工作表完整欄位 (birthday=生日, birth_time=出生時間,用於生命數字/紫微等命理)
-MEMBER_COLUMNS = ["member_id", "name", "phone", "email", "address",
-                  "birthday", "birth_time", "note", "created_at", "last_order_date"]
-
 def ensure_members_sheet():
     if st.session_state.get('_members_sheet_ok'):
         return
@@ -566,25 +640,10 @@ def ensure_members_sheet():
     try:
         existing = [ws.title for ws in sh.worksheets()]
         if "Members" not in existing:
-            ws = sh.add_worksheet(title="Members", rows=2000,
-                                  cols=max(12, len(MEMBER_COLUMNS)))
-            ws.append_row(MEMBER_COLUMNS, value_input_option='USER_ENTERED')
-        else:
-            # 既有工作表 → 補上缺少的欄位 (birthday / birth_time),不動既有資料
-            ws = sh.worksheet("Members")
-            header = ws.row_values(1)
-            missing = [c for c in ["birthday", "birth_time"] if c not in header]
-            if missing:
-                needed = len(header) + len(missing)
-                # 原始工作表可能只有 8 欄,寫第 9/10 欄會超出格線 → 先擴充欄位
-                try:
-                    if ws.col_count < needed:
-                        ws.add_cols(needed - ws.col_count)
-                except Exception:
-                    pass
-                for col in missing:
-                    header.append(col)
-                    ws.update_cell(1, len(header), col)
+            ws = sh.add_worksheet(title="Members", rows=2000, cols=10)
+            ws.append_row(["member_id", "name", "phone", "email", "address",
+                           "note", "created_at", "last_order_date",
+                           "birthday", "lunar_birthday"])
         st.session_state['_members_sheet_ok'] = True
     except Exception:
         pass
@@ -593,9 +652,10 @@ def load_members():
     ensure_members_sheet()
     df = load_data("Members")
     if df.empty:
-        return pd.DataFrame(columns=MEMBER_COLUMNS)
-    # 確保新欄位存在 (舊資料可能還沒這兩欄)
-    for col in ["birthday", "birth_time"]:
+        return pd.DataFrame(columns=["member_id", "name", "phone", "email",
+                                      "address", "note", "created_at", "last_order_date",
+                                      "birthday", "lunar_birthday"])
+    for col in ['birthday', 'lunar_birthday']:
         if col not in df.columns:
             df[col] = ""
     return df
@@ -607,71 +667,44 @@ def find_member_by_name(name):
     match = df[df['name'].astype(str) == str(name)]
     return match.iloc[0] if not match.empty else None
 
-def phone_as_text(phone):
-    """讓電話以「文字」寫入 Google Sheet,保留開頭的 0。
-    搭配 value_input_option='USER_ENTERED':前綴單引號會被 Sheets 當成文字標記,
-    讀取(get_all_records)時會自動移除,不會出現在資料中。"""
-    p = str(phone or '').strip()
-    if p and not p.startswith("'") and re.fullmatch(r'\d+', p):
-        return "'" + p
-    return p
-
-def as_sheet_text(value):
-    """強制以「文字」寫入 Google Sheet,避免日期(1979/05/05)、時間(8:30)
-    被自動轉成日期/時間序列值。前綴的單引號讀取時會自動移除。"""
-    v = str(value or '').strip()
-    if v and not v.startswith("'"):
-        return "'" + v
-    return v
-
-def save_member(name, phone, email, address, note="", birthday="", birth_time=""):
+def save_member(name, phone, email, address, note="", birthday="", lunar_birthday=""):
     ensure_members_sheet()
-    birthday = normalize_birthday(birthday)      # 統一為 YYYY/MM/DD
-    phone = phone_as_text(phone)                 # 保留電話開頭的 0
-    birthday = as_sheet_text(birthday)           # 以文字儲存,顯示為 1979/05/05
-    birth_time = as_sheet_text(birth_time)       # 以文字儲存,原樣顯示
     ws = get_worksheet_for_write("Members")
     if not ws:
         return False
     try:
-        all_vals = ws.get_all_values()
-        header = all_vals[0] if all_vals else MEMBER_COLUMNS
-        name_idx = header.index("name") if "name" in header else 1
-
-        # 依欄位名稱安全取得 index 的小工具
-        def col_i(col_name):
-            return header.index(col_name) if col_name in header else -1
-
-        # 1. 既有會員 → 更新欄位
-        for i, row in enumerate(all_vals[1:], 2):
-            if len(row) > name_idx and str(row[name_idx]) == str(name):
-                updates = {
-                    "phone": phone, "email": email, "address": address,
-                    "birthday": birthday, "birth_time": birth_time,
-                    "last_order_date": str(date.today()),
-                }
-                # note 只在有傳入時才覆蓋
-                if note:
-                    updates["note"] = note
-                for col_name, val in updates.items():
-                    ci = col_i(col_name)
-                    # 生日/出生時間/電話等:有值才覆蓋,避免清空既有資料
-                    if ci >= 0 and (val or col_name == "last_order_date"):
-                        ws.update_cell(i, ci + 1, val)
-                clear_cache()
-                return True
-
-        # 2. 新會員 → 依 header 順序組 row
+        existing = load_members()
+        if not existing.empty:
+            match = existing[existing['name'].astype(str) == str(name)]
+            if not match.empty:
+                all_vals = ws.get_all_values()
+                header = all_vals[0]
+                name_idx = header.index("name")
+                for i, row in enumerate(all_vals[1:], 2):
+                    if str(row[name_idx]) == str(name):
+                        ph_idx = header.index("phone")
+                        em_idx = header.index("email")
+                        ad_idx = header.index("address")
+                        dt_idx = header.index("last_order_date")
+                        if phone:
+                            ws.update_cell(i, ph_idx + 1, phone)
+                        if email:
+                            ws.update_cell(i, em_idx + 1, email)
+                        if address:
+                            ws.update_cell(i, ad_idx + 1, address)
+                        ws.update_cell(i, dt_idx + 1, str(date.today()))
+                        if birthday and "birthday" in header:
+                            bd_idx = header.index("birthday")
+                            ws.update_cell(i, bd_idx + 1, str(birthday))
+                        if lunar_birthday and "lunar_birthday" in header:
+                            lb_idx = header.index("lunar_birthday")
+                            ws.update_cell(i, lb_idx + 1, str(lunar_birthday))
+                        clear_cache()
+                        return True
         mid = f"M-{int(time.time()) % 100000:05d}"
-        value_map = {
-            "member_id": mid, "name": name, "phone": phone, "email": email,
-            "address": address, "birthday": birthday, "birth_time": birth_time,
-            "note": note, "created_at": str(datetime.now()),
-            "last_order_date": str(date.today()),
-        }
-        new_row = [value_map.get(h, "") for h in header]
-        # USER_ENTERED 才能讓電話的單引號文字標記生效
-        ws.append_row(new_row, value_input_option='USER_ENTERED')
+        ws.append_row([mid, name, phone, email, address, note,
+                       str(datetime.now()), str(date.today()),
+                       str(birthday), str(lunar_birthday)])
         clear_cache()
         return True
     except Exception:
@@ -694,633 +727,8 @@ def delete_member(name):
     except Exception:
         return False
 
-
-def normalize_birthday(s):
-    """將各種日期輸入正規化為 YYYY/MM/DD (例: 2000/01/05)。
-    支援: 2000-1-5 / 2000.1.5 / 2000/01/05 / 20000105。
-    無法解析(如「不詳」、農曆描述)則原樣返回。"""
-    s = str(s or '').strip()
-    if not s:
-        return ''
-    # 8 碼純數字: 20000105
-    if re.fullmatch(r'\d{8}', s):
-        return f"{s[0:4]}/{int(s[4:6]):02d}/{int(s[6:8]):02d}"
-    # 以 - / . 空格 分隔的年月日
-    digits = re.findall(r'\d+', s)
-    if len(digits) >= 3 and len(digits[0]) == 4:
-        try:
-            y, m, d = int(digits[0]), int(digits[1]), int(digits[2])
-            if 1 <= m <= 12 and 1 <= d <= 31:
-                return f"{y:04d}/{m:02d}/{d:02d}"
-        except ValueError:
-            pass
-    return s
-
-
 # ==========================================
-# 3.6b 會員關係鏈核心功能
-# ==========================================
-# 在會員之間建立關係 (配偶/父子/母女/朋友等),支援雙向查詢。
-# 儲存語意: "member_a 與 member_b 為 [relation_type]"
-# 親子類 (父子/父女/母子/母女): 會員A = 長輩(父/母),會員B = 晚輩(子/女)
-RELATION_TYPES = ["配偶", "伴侶", "父子", "父女", "母子", "母女",
-                  "兄弟姊妹", "祖父母", "孫子女", "親戚", "朋友", "同事", "其他"]
-# 親子類為「成對名稱」,本身已含雙方角色,反向視為同一關係
-RELATION_REVERSE = {
-    "配偶": "配偶", "伴侶": "伴侶",
-    "父子": "父子", "父女": "父女", "母子": "母子", "母女": "母女",
-    "兄弟姊妹": "兄弟姊妹", "祖父母": "孫子女", "孫子女": "祖父母",
-    "親戚": "親戚", "朋友": "朋友", "同事": "同事", "其他": "其他",
-}
-# 親子類關係:A 為長輩、B 為晚輩,顯示時標明方向
-PARENT_CHILD_RELATIONS = {"父子", "父女", "母子", "母女"}
-RELATION_COLUMNS = ["relation_id", "member_a", "relation_type",
-                    "member_b", "note", "created_at"]
-
-
-def ensure_relations_sheet():
-    if st.session_state.get('_relations_sheet_ok'):
-        return
-    sh = get_spreadsheet()
-    if not sh:
-        return
-    try:
-        existing = [ws.title for ws in sh.worksheets()]
-        if "MemberRelations" not in existing:
-            ws = sh.add_worksheet(title="MemberRelations", rows=2000,
-                                  cols=len(RELATION_COLUMNS))
-            ws.append_row(RELATION_COLUMNS)
-        st.session_state['_relations_sheet_ok'] = True
-    except Exception:
-        pass
-
-
-def load_relations():
-    ensure_relations_sheet()
-    df = load_data("MemberRelations")
-    if df.empty:
-        return pd.DataFrame(columns=RELATION_COLUMNS)
-    for col in RELATION_COLUMNS:
-        if col not in df.columns:
-            df[col] = ""
-    return df
-
-
-def add_relation(member_a, relation_type, member_b, note=""):
-    """新增關係: member_a 的 relation_type 是 member_b。"""
-    if not member_a or not member_b or member_a == member_b:
-        return False, "請選擇兩位不同的會員"
-    ensure_relations_sheet()
-    ws = get_worksheet_for_write("MemberRelations")
-    if not ws:
-        return False, "無法連線到 MemberRelations 工作表"
-    try:
-        # 避免重複建立同一組關係
-        existing = load_relations()
-        if not existing.empty:
-            dup = existing[
-                (existing['member_a'].astype(str) == str(member_a)) &
-                (existing['member_b'].astype(str) == str(member_b)) &
-                (existing['relation_type'].astype(str) == str(relation_type))
-            ]
-            if not dup.empty:
-                return False, "此關係已存在"
-        rid = f"R-{int(time.time() * 1000) % 10**10}"
-        ws.append_row([rid, member_a, relation_type, member_b, note,
-                       str(datetime.now())])
-        clear_cache()
-        if relation_type in PARENT_CHILD_RELATIONS:
-            return True, f"已建立關係: {member_a}(長輩) 與 {member_b}(晚輩) 為 {relation_type}"
-        return True, f"已建立關係: {member_a} 與 {member_b} 為 {relation_type}"
-    except Exception as e:
-        return False, f"建立失敗: {e}"
-
-
-def delete_relation(relation_id):
-    ws = get_worksheet_for_write("MemberRelations")
-    if not ws:
-        return False
-    try:
-        all_vals = ws.get_all_values()
-        header = all_vals[0]
-        rid_idx = header.index("relation_id")
-        for i, row in enumerate(all_vals[1:], 2):
-            if len(row) > rid_idx and str(row[rid_idx]) == str(relation_id):
-                ws.delete_rows(i)
-                clear_cache()
-                return True
-        return False
-    except Exception:
-        return False
-
-
-def describe_relation(viewer, target, relation_type, viewer_is_a):
-    """產生一句清楚的關係描述。
-    親子類: A=長輩(父/母), B=晚輩(子/女)。
-    例: 父子 → 長輩王大 對 晚輩王小,viewer 是長輩則「王大 是 王小 的 父親」。
-    """
-    if relation_type in PARENT_CHILD_RELATIONS:
-        elder_role = "父" if relation_type[0] == "父" else "母"
-        younger_role = "子" if relation_type[1] == "子" else "女"
-        elder_word = "父親" if elder_role == "父" else "母親"
-        younger_word = "兒子" if younger_role == "子" else "女兒"
-        if viewer_is_a:  # viewer 是長輩
-            return f"{viewer} 是 {target} 的 {elder_word}（{relation_type}）"
-        else:            # viewer 是晚輩
-            return f"{viewer} 是 {target} 的 {younger_word}（{relation_type}）"
-    else:
-        # 對稱關係: 配偶/朋友/兄弟姊妹...
-        return f"{viewer} 與 {target} 為 {relation_type}"
-
-
-def get_member_relations(name):
-    """回傳該會員的所有關係(含反向推導)。
-    每筆: {target, relation, relation_id, note, reverse, desc}
-    """
-    df = load_relations()
-    if df.empty:
-        return []
-    results = []
-    for _, r in df.iterrows():
-        a = str(r.get('member_a', ''))
-        b = str(r.get('member_b', ''))
-        rt = str(r.get('relation_type', ''))
-        rid = str(r.get('relation_id', ''))
-        note = str(r.get('note', ''))
-        if a == name:
-            results.append({
-                'target': b, 'relation': rt, 'relation_id': rid,
-                'note': note, 'reverse': False,
-                'desc': describe_relation(name, b, rt, viewer_is_a=True),
-            })
-        elif b == name:
-            rev = RELATION_REVERSE.get(rt, rt)
-            results.append({
-                'target': a, 'relation': rev, 'relation_id': rid,
-                'note': note, 'reverse': True,
-                'desc': describe_relation(name, a, rt, viewer_is_a=False),
-            })
-    return results
-
-
-def rename_member_in_relations(old_name, new_name):
-    """會員改名時同步更新關係鏈中的名稱(選用)。"""
-    ws = get_worksheet_for_write("MemberRelations")
-    if not ws:
-        return
-    try:
-        all_vals = ws.get_all_values()
-        header = all_vals[0]
-        a_idx = header.index("member_a")
-        b_idx = header.index("member_b")
-        for i, row in enumerate(all_vals[1:], 2):
-            if len(row) > a_idx and str(row[a_idx]) == str(old_name):
-                ws.update_cell(i, a_idx + 1, new_name)
-            if len(row) > b_idx and str(row[b_idx]) == str(old_name):
-                ws.update_cell(i, b_idx + 1, new_name)
-        clear_cache()
-    except Exception:
-        pass
-
-
-# ==========================================
-# 3.7 工資計算核心功能 (與 wage-app 整合)
-# ==========================================
-# 設計目標:
-#   - 出貨/訂單 → 自動產生工資紀錄
-#   - 與獨立的 wage-app 共用同一份 catalog 與 entries 資料模型
-#   - 全部存在 Google Sheet (WageCatalog / WageEntries / WageSettlements)
-#   - 員工統一使用 KEYERS 名單,姓名作為對接鍵
-
-# 預設工資對照表 - 來源: wage-app/catalog-data.js
-DEFAULT_WAGE_CATALOG = [
-    # (product_name, wage_make, wage_pack, wage_ship, wage_svc)
-    ("光之鹽語 - 光之鹽語禮盒", 52, 6, 10, 0),
-    ("艾草包10入", 0, 10, 10, 0),
-    ("艾草包5入", 0, 5, 10, 0),
-    ("脈輪淨化蠟燭組 - 9入", 45, 4.5, 10, 0),
-    ("光之鹽語 - 單購魔法鹽", 24, 4, 10, 0),
-    ("大淨化包", 24, 3, 10, 0),
-    ("大淨化包｜三日快速顯化儀式 - 代點顯化蠟燭", 24, 3, 0, 250),
-    ("顯化蠟燭2入", 10, 1, 10, 0),
-    ("顯化蠟燭｜代點服務", 10, 1, 0, 200),
-    ("2026 馬上成功・人財貴圓滿組", 48, 6, 10, 0),
-    ("28天脈輪能量日常守護組", 152, 16, 10, 0),
-    ("數字水晶手鍊(細)", 50, 0, 10, 0),
-    ("數字水晶手鍊(粗)", 100, 0, 10, 0),
-    ("生命數字能量項鍊(鈦鋼), 項鍊整組", 200, 0, 10, 0),
-    ("銅鑼浴", 0, 0, 0, 450),
-    ("生命靈數解盤服務", 0, 0, 0, 2520),
-    ("【清明節氣祈福組 】- 家族能量清理與內在小孩療癒 - 老師代點", 24, 3, 0, 250),
-]
-
-WAGE_STAGE_LABELS = {"make": "製造", "pack": "包裝", "ship": "出貨", "svc": "服務費"}
-
-
-def ensure_wage_sheets():
-    """確保 WageCatalog / WageEntries / WageSettlements 工作表存在,並 seed 預設資料。"""
-    if st.session_state.get('_wage_sheets_ok'):
-        return
-    sh = get_spreadsheet()
-    if not sh:
-        return
-    try:
-        existing = [ws.title for ws in sh.worksheets()]
-        if "WageCatalog" not in existing:
-            ws = sh.add_worksheet(title="WageCatalog", rows=300, cols=6)
-            ws.append_row(["product_name", "wage_make", "wage_pack",
-                           "wage_ship", "wage_svc", "note"])
-            for it in DEFAULT_WAGE_CATALOG:
-                ws.append_row([it[0], float(it[1]), float(it[2]),
-                               float(it[3]), float(it[4]), ""])
-        if "WageEntries" not in existing:
-            ws = sh.add_worksheet(title="WageEntries", rows=5000, cols=14)
-            ws.append_row(["entry_id", "date", "employee_name", "category",
-                           "stage", "item_name", "qty", "price", "amount",
-                           "note", "order_no", "created_by", "created_at",
-                           "settled"])
-        if "WageSettlements" not in existing:
-            ws = sh.add_worksheet(title="WageSettlements", rows=200, cols=4)
-            ws.append_row(["year_month", "settled_at", "total", "settled_by"])
-        st.session_state['_wage_sheets_ok'] = True
-    except Exception:
-        pass
-
-
-@st.cache_data(ttl=60)
-def load_wage_catalog():
-    ws = get_worksheet("WageCatalog")
-    if not ws:
-        return pd.DataFrame()
-    try:
-        df = pd.DataFrame(ws.get_all_records())
-        for col in ['wage_make', 'wage_pack', 'wage_ship', 'wage_svc']:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
-        return df
-    except Exception:
-        return pd.DataFrame()
-
-
-def is_proxy_product(product_name):
-    """代點服務 → 不計出貨工資"""
-    return '代點' in str(product_name or '')
-
-
-def match_wage_catalog(product_name):
-    """依商品名稱比對工資對照表,回傳 dict 或 None。
-    比對順序: 完全相等 → 前綴(以 ' - ' 切分) → 雙向 substring。
-    """
-    df = load_wage_catalog()
-    if df.empty:
-        return None
-    name = str(product_name or '').strip()
-    if not name:
-        return None
-    names = df['product_name'].astype(str)
-    # 1. exact
-    exact = df[names == name]
-    if not exact.empty:
-        return exact.iloc[0].to_dict()
-    # 2. 以分隔符切分 baseName 後比對
-    base = name.split(' - ')[0].split('｜')[0].strip()
-    if base and base != name:
-        bm = df[names.str.startswith(base) | (names == base)]
-        if not bm.empty:
-            return bm.iloc[0].to_dict()
-    # 3. substring 雙向
-    sub = df[names.apply(lambda x: (x and (x in name or name in x)))]
-    if not sub.empty:
-        return sub.iloc[0].to_dict()
-    return None
-
-
-def generate_wage_id():
-    return f"W-{int(time.time() * 1000)}"
-
-
-def add_wage_entry(entry):
-    """寫入一筆工資紀錄。entry 為 dict。"""
-    ensure_wage_sheets()
-    ws = get_worksheet_for_write("WageEntries")
-    if not ws:
-        return False
-    try:
-        ws.append_row([
-            entry.get('entry_id') or generate_wage_id(),
-            entry.get('date', str(date.today())),
-            entry.get('employee_name', ''),
-            entry.get('category', '產品'),
-            entry.get('stage', '') or '',
-            entry.get('item_name', ''),
-            float(entry.get('qty', 0) or 0),
-            float(entry.get('price', 0) or 0),
-            float(entry.get('amount', 0) or 0),
-            entry.get('note', '') or '',
-            entry.get('order_no', '') or '',
-            entry.get('created_by', '') or '',
-            entry.get('created_at') or str(datetime.now()),
-            entry.get('settled', 'N') or 'N',
-        ])
-        clear_cache()
-        return True
-    except Exception:
-        return False
-
-
-def create_wage_entries_for_items(items_list, stage_keyers, order_no, created_by):
-    """
-    依「項目清單 + 各階段員工」,參照 WageCatalog 產生工資紀錄。
-
-    items_list: [{'product_name': str, 'qty': float, ...}, ...]
-    stage_keyers: {'make': name|'', 'pack': name|'', 'ship': name|'', 'svc': name|''}
-    回傳 (created_count, skipped_count, messages)
-    """
-    ensure_wage_sheets()
-    created = 0
-    skipped = 0
-    messages = []
-    today = str(date.today())
-    now = str(datetime.now())
-
-    for item in items_list:
-        pname = (item.get('product_name')
-                 or item.get('name', '') or '')
-        qty = float(item.get('qty', 0) or 0)
-        if qty <= 0 or not pname:
-            continue
-        catalog = match_wage_catalog(pname)
-        if catalog is None:
-            skipped += 1
-            messages.append(f"⚠ 商品「{pname}」未對應工資設定")
-            continue
-        is_proxy = is_proxy_product(pname) or is_proxy_product(catalog.get('product_name', ''))
-        stages = [
-            ('make', '製造', float(catalog.get('wage_make', 0) or 0)),
-            ('pack', '包裝', float(catalog.get('wage_pack', 0) or 0)),
-            ('ship', '出貨', 0.0 if is_proxy else float(catalog.get('wage_ship', 0) or 0)),
-            ('svc',  '服務費', float(catalog.get('wage_svc', 0) or 0)),
-        ]
-        for key, stage_name, unit_price in stages:
-            emp = stage_keyers.get(key, '')
-            if not emp or unit_price <= 0:
-                continue
-            amount = unit_price * qty
-            ok = add_wage_entry({
-                'entry_id': generate_wage_id() + f"-{key}",
-                'date': today,
-                'employee_name': emp,
-                'category': '產品',
-                'stage': stage_name,
-                'item_name': catalog.get('product_name', pname),
-                'qty': qty,
-                'price': unit_price,
-                'amount': amount,
-                'note': f"訂單 {order_no}" if order_no else "",
-                'order_no': order_no or '',
-                'created_by': created_by or '',
-                'created_at': now,
-                'settled': 'N',
-            })
-            if ok:
-                created += 1
-    return created, skipped, messages
-
-
-@st.cache_data(ttl=30)
-def load_wage_entries():
-    ws = get_worksheet("WageEntries")
-    if not ws:
-        return pd.DataFrame()
-    try:
-        df = pd.DataFrame(ws.get_all_records())
-        for col in ['qty', 'price', 'amount']:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
-        return df
-    except Exception:
-        return pd.DataFrame()
-
-
-def delete_wage_entry(entry_id):
-    ws = get_worksheet_for_write("WageEntries")
-    if not ws:
-        return False
-    try:
-        all_vals = ws.get_all_values()
-        if not all_vals:
-            return False
-        header = all_vals[0]
-        if 'entry_id' not in header:
-            return False
-        idx = header.index('entry_id')
-        rows_to_del = []
-        for i, row in enumerate(all_vals[1:], 2):
-            if len(row) > idx and str(row[idx]) == str(entry_id):
-                rows_to_del.append(i)
-        for r in sorted(rows_to_del, reverse=True):
-            ws.delete_rows(r)
-        clear_cache()
-        return len(rows_to_del) > 0
-    except Exception:
-        return False
-
-
-def delete_wage_entries_by_order(order_no):
-    """訂單取消/刪除時,連同其工資紀錄一起移除。"""
-    ws = get_worksheet_for_write("WageEntries")
-    if not ws:
-        return 0
-    try:
-        all_vals = ws.get_all_values()
-        if not all_vals:
-            return 0
-        header = all_vals[0]
-        if 'order_no' not in header:
-            return 0
-        ono_idx = header.index('order_no')
-        rows = [i for i, row in enumerate(all_vals[1:], 2)
-                if len(row) > ono_idx and str(row[ono_idx]) == str(order_no)]
-        for r in sorted(rows, reverse=True):
-            ws.delete_rows(r)
-        clear_cache()
-        return len(rows)
-    except Exception:
-        return 0
-
-
-def upsert_wage_catalog(product_name, wage_make, wage_pack, wage_ship, wage_svc, note=""):
-    ensure_wage_sheets()
-    ws = get_worksheet_for_write("WageCatalog")
-    if not ws:
-        return False
-    try:
-        all_vals = ws.get_all_values()
-        header = all_vals[0]
-        name_idx = header.index('product_name')
-        for i, row in enumerate(all_vals[1:], 2):
-            if len(row) > name_idx and str(row[name_idx]) == str(product_name):
-                ws.update(f'A{i}:F{i}', [[product_name,
-                                          float(wage_make), float(wage_pack),
-                                          float(wage_ship), float(wage_svc),
-                                          note]])
-                clear_cache()
-                return True
-        ws.append_row([product_name, float(wage_make), float(wage_pack),
-                       float(wage_ship), float(wage_svc), note])
-        clear_cache()
-        return True
-    except Exception:
-        return False
-
-
-def delete_wage_catalog_item(product_name):
-    ws = get_worksheet_for_write("WageCatalog")
-    if not ws:
-        return False
-    try:
-        all_vals = ws.get_all_values()
-        header = all_vals[0]
-        name_idx = header.index('product_name')
-        rows_to_del = []
-        for i, row in enumerate(all_vals[1:], 2):
-            if len(row) > name_idx and str(row[name_idx]) == str(product_name):
-                rows_to_del.append(i)
-        for r in sorted(rows_to_del, reverse=True):
-            ws.delete_rows(r)
-        clear_cache()
-        return len(rows_to_del) > 0
-    except Exception:
-        return False
-
-
-def load_wage_settlements():
-    ws = get_worksheet("WageSettlements")
-    if not ws:
-        return pd.DataFrame()
-    try:
-        return pd.DataFrame(ws.get_all_records())
-    except Exception:
-        return pd.DataFrame()
-
-
-def mark_entries_settled(year_month):
-    """將指定月份的所有工資紀錄 settled 標為 Y。"""
-    ws = get_worksheet_for_write("WageEntries")
-    if not ws:
-        return
-    try:
-        all_vals = ws.get_all_values()
-        if not all_vals:
-            return
-        header = all_vals[0]
-        if 'date' not in header or 'settled' not in header:
-            return
-        date_idx = header.index('date')
-        settled_idx = header.index('settled')
-        for i, row in enumerate(all_vals[1:], 2):
-            if len(row) > date_idx and str(row[date_idx]).startswith(year_month):
-                ws.update_cell(i, settled_idx + 1, 'Y')
-    except Exception:
-        pass
-
-
-def mark_month_settled(year_month, total, settled_by):
-    ensure_wage_sheets()
-    ws = get_worksheet_for_write("WageSettlements")
-    if not ws:
-        return False
-    try:
-        all_vals = ws.get_all_values()
-        if all_vals and len(all_vals) > 0:
-            header = all_vals[0]
-            ym_idx = header.index('year_month')
-            for i, row in enumerate(all_vals[1:], 2):
-                if len(row) > ym_idx and str(row[ym_idx]) == str(year_month):
-                    ws.update(f'A{i}:D{i}', [[year_month, str(datetime.now()),
-                                              float(total), settled_by]])
-                    mark_entries_settled(year_month)
-                    clear_cache()
-                    return True
-        ws.append_row([year_month, str(datetime.now()), float(total), settled_by])
-        mark_entries_settled(year_month)
-        clear_cache()
-        return True
-    except Exception:
-        return False
-
-
-def build_wage_app_json(df_entries=None):
-    """將 WageEntries 轉成 wage-app 相容的 JSON 結構,可直接匯入 wage-app。"""
-    if df_entries is None:
-        df_entries = load_wage_entries()
-    # employees
-    emp_names = []
-    if not df_entries.empty:
-        emp_names = sorted(set(str(n) for n in df_entries['employee_name'].tolist() if n))
-    # 補上 KEYERS 確保所有員工都在
-    for k in KEYERS:
-        if k not in emp_names:
-            emp_names.append(k)
-    employees = []
-    name_to_id = {}
-    for n in emp_names:
-        if not n or n.lower() == 'nan':
-            continue
-        eid = f"e_{abs(hash(n)) % 10**10}"
-        employees.append({"id": eid, "name": n, "multProd": 1})
-        name_to_id[n] = eid
-    # entries
-    entries = []
-    if not df_entries.empty:
-        for _, row in df_entries.iterrows():
-            stage_val = row.get('stage', '')
-            entries.append({
-                "id": str(row.get('entry_id', '')),
-                "date": str(row.get('date', '')),
-                "employeeId": name_to_id.get(str(row.get('employee_name', '')), ''),
-                "category": str(row.get('category', '產品')),
-                "stage": str(stage_val) if stage_val else None,
-                "item": str(row.get('item_name', '')),
-                "qty": float(row.get('qty', 0) or 0),
-                "price": float(row.get('price', 0) or 0),
-                "amount": float(row.get('amount', 0) or 0),
-                "note": str(row.get('note', '')),
-                "createdBy": str(row.get('created_by', '')),
-                "createdAt": str(row.get('created_at', '')),
-            })
-    # settlements
-    settlements = {}
-    df_s = load_wage_settlements()
-    if not df_s.empty:
-        for _, row in df_s.iterrows():
-            settlements[str(row.get('year_month', ''))] = {
-                "settledAt": str(row.get('settled_at', '')),
-                "total": float(row.get('total', 0) or 0),
-            }
-    # catalog
-    cat_df = load_wage_catalog()
-    products = []
-    if not cat_df.empty:
-        for _, r in cat_df.iterrows():
-            products.append({
-                "name": str(r.get('product_name', '')),
-                "wageMake": float(r.get('wage_make', 0) or 0),
-                "wagePack": float(r.get('wage_pack', 0) or 0),
-                "wageShip": float(r.get('wage_ship', 0) or 0),
-                "wageSvc": float(r.get('wage_svc', 0) or 0),
-            })
-    return {
-        "employees": employees,
-        "entries": entries,
-        "settlements": settlements,
-        "catalog": {"products": products},
-        "settings": {"reminderDay": 5, "localUser": "", "lastBackupAt": None}
-    }
-
-
-# ==========================================
-# 3.8 歷史紀錄顯示
+# 3.7 歷史紀錄顯示
 # ==========================================
 
 def render_history_table(doc_type_filter=None):
@@ -1353,13 +761,10 @@ def render_history_table(doc_type_filter=None):
 st.set_page_config(page_title=PAGE_TITLE, layout="wide", page_icon="💎")
 st.title(f"💎 {PAGE_TITLE}")
 ensure_price_column()
-ensure_wage_sheets()
 
 with st.sidebar:
     st.header("功能選單")
-    page = st.radio("前往", ["🛒 訂單管理", "👥 會員管理", "🔨 製造作業",
-                             "🚚 出貨作業", "📦 商品管理", "📥 進貨作業",
-                             "📦 移庫作業", "💰 工資計算", "📊 報表查詢"])
+    page = st.radio("前往", ["🛒 訂單管理", "👥 會員管理", "🔨 製造作業", "🚚 出貨作業", "📦 商品管理", "📥 進貨作業", "📦 移庫作業", "📊 報表查詢"])
     if st.button("刷新資料"):
         clear_cache()
         st.rerun()
@@ -1455,266 +860,32 @@ elif page == "📥 進貨作業":
 
 # --- 🚚 出貨作業 ---
 elif page == "🚚 出貨作業":
-    st.subheader("🚚 銷售出貨")
-    ensure_wage_sheets()
-
-    # === 出貨模式選擇 ===
-    ship_mode = st.radio("出貨方式",
-                          ["📋 從訂單出貨 (推薦,自動帶出商品)",
-                           "✋ 手動挑選商品"],
-                          horizontal=True, key="ship_mode_radio")
+    st.subheader("🚚 銷售出貨 (多品項清單)")
+    if 'out_list' not in st.session_state: st.session_state['out_list'] = []
+    col_a, col_b, col_c = st.columns(3)
+    ship_opt = col_a.selectbox("寄送方式", SHIPPING_METHODS + ["手動輸入..."])
+    final_ship = col_a.text_input("自訂方式") if ship_opt == "手動輸入..." else ship_opt
+    ship_no = col_b.text_input("配送號碼")
+    user = col_c.selectbox("經手人", KEYERS, index=3)
+    order_id = st.text_input("訂單編號 / 備註")
     st.divider()
-
-    # =====================================================
-    # 📋 模式 A: 從訂單出貨
-    # =====================================================
-    if ship_mode.startswith("📋"):
-        df_orders = load_orders()
-        pending_statuses = ["已確認", "未付款/未出貨", "已付款/未出貨",
-                            "處理中", "已成立", "待處理"]
-        if df_orders.empty:
-            st.info("目前還沒有任何訂單。請先到「🛒 訂單管理 → 📝 新增訂單」建立訂單。")
-        else:
-            pending = df_orders[df_orders['status'].isin(pending_statuses)].copy()
-            if pending.empty:
-                st.success("目前沒有待出貨的訂單,所有訂單都已出貨或已完成。")
-            else:
-                # 排序: 最新訂單在最上面
-                pending = pending.sort_values('created_at', ascending=False) \
-                            if 'created_at' in pending.columns else pending
-                order_labels = []
-                for _, r in pending.iterrows():
-                    status_icon = ORDER_STATUS_COLORS.get(str(r.get('status', '')), '⚪')
-                    order_labels.append(
-                        f"{r['order_no']} | {status_icon} {r.get('status','')} | "
-                        f"{r.get('customer_name','')} | ${float(r.get('total_amount',0)):,.0f}"
-                    )
-                sel_order = st.selectbox(
-                    f"📋 選擇要出貨的訂單 (共 {len(pending)} 張待出貨)",
-                    order_labels, key="ship_order_sel"
-                )
-                sel_ono = sel_order.split(" | ")[0].strip()
-                row = pending[pending['order_no'].astype(str) == sel_ono].iloc[0]
-                items = load_order_items(sel_ono)
-
-                # === 訂單資訊摘要 ===
-                ic1, ic2, ic3, ic4 = st.columns(4)
-                ic1.metric("客戶", str(row.get('customer_name', '') or '—'))
-                ic2.metric("電話", str(row.get('customer_phone', '') or '—'))
-                ic3.metric("應付金額", f"${float(row.get('total_amount', 0)):,.0f}")
-                ic4.metric("狀態", str(row.get('status', '')))
-                addr = str(row.get('shipping_address', '') or '')
-                if addr:
-                    st.caption(f"📍 寄送地址: {addr}")
-                ord_note = str(row.get('note', '') or '')
-                if ord_note:
-                    st.caption(f"📝 訂單備註: {ord_note}")
-
-                if items.empty:
-                    st.warning("⚠ 此訂單沒有任何品項,無法出貨。請至「🛒 訂單管理」補加品項。")
-                else:
-                    # === 自動帶出的品項 ===
-                    st.markdown(f"##### 📦 訂單品項 (共 {len(items)} 項,將全部出貨)")
-                    items_disp = items[['product_name', 'sku', 'warehouse', 'qty',
-                                        'unit_price', 'subtotal']].rename(columns={
-                        'product_name': '品名', 'sku': '貨號',
-                        'warehouse': '出貨倉庫', 'qty': '數量',
-                        'unit_price': '單價', 'subtotal': '小計'
-                    })
-                    st.dataframe(items_disp, use_container_width=True, hide_index=True)
-
-                    # === 出貨資訊 ===
-                    st.markdown("##### 🚚 出貨資訊")
-                    sc1, sc2 = st.columns(2)
-                    so_method = sc1.selectbox("寄送方式", SHIPPING_METHODS,
-                                              key=f"so_sm_{sel_ono}")
-                    so_no = sc2.text_input("配送號碼 / 物流單號",
-                                           key=f"so_sn_{sel_ono}")
-                    sc3, sc4 = st.columns(2)
-                    so_keyer = sc3.selectbox("出貨經手人", KEYERS, index=3,
-                                             key=f"so_su_{sel_ono}")
-                    so_target = sc4.selectbox(
-                        "出貨後訂單狀態",
-                        ["未付款/已出貨", "已完成"],
-                        index=(1 if str(row.get('status', '')) == "已付款/未出貨" else 0),
-                        key=f"so_ts_{sel_ono}"
-                    )
-
-                    # === 工資階段員工指派 ===
-                    st.markdown("##### 💰 工資階段員工指派(各階段留「—」= 不計薪)")
-                    keyer_opts = ["—"] + KEYERS
-                    default_ship_idx = (KEYERS.index(so_keyer) + 1) if so_keyer in KEYERS else 0
-                    sk1, sk2, sk3, sk4 = st.columns(4)
-                    so_skm = sk1.selectbox("製造", keyer_opts, key=f"so_skm_{sel_ono}")
-                    so_skp = sk2.selectbox("包裝", keyer_opts, key=f"so_skp_{sel_ono}")
-                    so_sks = sk3.selectbox("出貨", keyer_opts, index=default_ship_idx,
-                                           key=f"so_sks_{sel_ono}")
-                    so_skv = sk4.selectbox("服務費", keyer_opts, key=f"so_skv_{sel_ono}")
-                    so_stage_keyers = {
-                        'make': so_skm if so_skm != '—' else '',
-                        'pack': so_skp if so_skp != '—' else '',
-                        'ship': so_sks if so_sks != '—' else '',
-                        'svc':  so_skv if so_skv != '—' else '',
-                    }
-
-                    # === 工資預覽 ===
-                    if any(so_stage_keyers.values()):
-                        preview, unmatched, total_wage = [], [], 0.0
-                        for _, it in items.iterrows():
-                            pn = str(it.get('product_name', ''))
-                            cat = match_wage_catalog(pn)
-                            if not cat:
-                                unmatched.append(pn)
-                                continue
-                            is_p = is_proxy_product(pn) or is_proxy_product(cat.get('product_name', ''))
-                            q = float(it['qty'])
-                            m = float(cat.get('wage_make', 0)) * q if so_stage_keyers['make'] else 0
-                            p = float(cat.get('wage_pack', 0)) * q if so_stage_keyers['pack'] else 0
-                            s = (0 if is_p else float(cat.get('wage_ship', 0)) * q) if so_stage_keyers['ship'] else 0
-                            v = float(cat.get('wage_svc',  0)) * q if so_stage_keyers['svc']  else 0
-                            row_total = m + p + s + v
-                            total_wage += row_total
-                            preview.append({
-                                '品名': pn, '數量': q,
-                                f"製造({so_stage_keyers['make'] or '—'})": m,
-                                f"包裝({so_stage_keyers['pack'] or '—'})": p,
-                                f"出貨({so_stage_keyers['ship'] or '—'})": s,
-                                f"服務費({so_stage_keyers['svc'] or '—'})": v,
-                                '小計': row_total,
-                            })
-                        with st.expander(f"💰 工資預覽 (合計 NT$ {total_wage:,.0f})",
-                                         expanded=True):
-                            if preview:
-                                st.dataframe(pd.DataFrame(preview),
-                                             use_container_width=True, hide_index=True)
-                            if unmatched:
-                                st.warning("以下商品未對應工資設定,將不會產生工資:\n" +
-                                           "\n".join(f"- {n}" for n in unmatched))
-                                st.caption("可至「💰 工資計算 → 📚 工資對照表」新增對應")
-                    else:
-                        st.info("ℹ 目前所有階段員工皆為「—」,本次出貨將不會產生工資紀錄")
-
-                    # === 確認出貨 ===
-                    if st.button(f"🚚 確認出貨「{sel_ono}」並產生工資",
-                                  type="primary", use_container_width=True,
-                                  key=f"so_btn_{sel_ono}"):
-                        ok, msg = ship_order(
-                            sel_ono, so_keyer, so_method, so_no, so_target,
-                            stage_keyers=so_stage_keyers, created_by=so_keyer
-                        )
-                        if ok:
-                            st.success(msg)
-                            time.sleep(1.5)
-                            st.rerun()
-                        else:
-                            st.error(msg)
-
-    # =====================================================
-    # ✋ 模式 B: 手動挑選商品 (保留原邏輯)
-    # =====================================================
-    else:
-        if 'out_list' not in st.session_state:
-            st.session_state['out_list'] = []
-        col_a, col_b, col_c = st.columns(3)
-        ship_opt = col_a.selectbox("寄送方式", SHIPPING_METHODS + ["手動輸入..."])
-        final_ship = col_a.text_input("自訂方式") if ship_opt == "手動輸入..." else ship_opt
-        ship_no = col_b.text_input("配送號碼")
-        user = col_c.selectbox("經手人", KEYERS, index=3)
-        order_id = st.text_input("訂單編號 / 備註")
-
-        st.markdown("##### 💰 工資階段員工指派(各階段留「—」= 不計薪)")
-        sk1, sk2, sk3, sk4 = st.columns(4)
-        keyer_opts = ["—"] + KEYERS
-        default_ship_idx = (KEYERS.index(user) + 1) if user in KEYERS else 0
-        skey_make = sk1.selectbox("製造", keyer_opts, index=0, key="m_ship_skey_make")
-        skey_pack = sk2.selectbox("包裝", keyer_opts, index=0, key="m_ship_skey_pack")
-        skey_ship = sk3.selectbox("出貨", keyer_opts, index=default_ship_idx, key="m_ship_skey_ship")
-        skey_svc  = sk4.selectbox("服務費", keyer_opts, index=0, key="m_ship_skey_svc")
-
-        st.divider()
-        prods = get_formatted_product_df()
-        if not prods.empty:
-            col1, col2, col3 = st.columns([3, 1, 1])
-            sel_p = col1.selectbox("挑選商品", prods['label'])
-            wh = col2.selectbox("倉庫", WAREHOUSES, index=3)
-            qty = col3.number_input("數量", 1.0)
-            if st.button("加入待出貨清單"):
-                st.session_state['out_list'].append({
-                    'sku': sel_p.split(" | ")[0],
-                    'name': sel_p.split(" | ")[1],
-                    'wh': wh, 'qty': qty
-                })
-                st.rerun()
-
-        if st.session_state['out_list']:
-            for i, item in enumerate(st.session_state['out_list']):
-                c_l, c_d = st.columns([5, 1])
-                c_l.write(f"**{item['name']}** - {item['wh']} x{item['qty']}")
-                if c_d.button("移除", key=f"rm_o_{i}"):
-                    st.session_state['out_list'].pop(i)
-                    st.rerun()
-
-            stage_keyers = {
-                'make': skey_make if skey_make != '—' else '',
-                'pack': skey_pack if skey_pack != '—' else '',
-                'ship': skey_ship if skey_ship != '—' else '',
-                'svc':  skey_svc  if skey_svc  != '—' else '',
-            }
-            if any(stage_keyers.values()):
-                preview, unmatched, total_wage = [], [], 0.0
-                for x in st.session_state['out_list']:
-                    cat = match_wage_catalog(x['name'])
-                    if not cat:
-                        unmatched.append(x['name'])
-                        continue
-                    is_p = is_proxy_product(x['name']) or is_proxy_product(cat.get('product_name', ''))
-                    m = (float(cat.get('wage_make', 0)) * x['qty']) if stage_keyers['make'] else 0
-                    p = (float(cat.get('wage_pack', 0)) * x['qty']) if stage_keyers['pack'] else 0
-                    s = (0 if is_p else float(cat.get('wage_ship', 0)) * x['qty']) if stage_keyers['ship'] else 0
-                    v = (float(cat.get('wage_svc',  0)) * x['qty']) if stage_keyers['svc']  else 0
-                    row_total = m + p + s + v
-                    total_wage += row_total
-                    preview.append({
-                        '商品': x['name'], '數量': x['qty'],
-                        f"製造({stage_keyers['make'] or '—'})": m,
-                        f"包裝({stage_keyers['pack'] or '—'})": p,
-                        f"出貨({stage_keyers['ship'] or '—'})": s,
-                        f"服務費({stage_keyers['svc'] or '—'})": v,
-                        '小計': row_total,
-                    })
-                with st.expander(f"💰 工資預覽 (合計 NT$ {total_wage:,.0f})", expanded=True):
-                    if preview:
-                        st.dataframe(pd.DataFrame(preview),
-                                     use_container_width=True, hide_index=True)
-                    if unmatched:
-                        st.warning("以下商品未對應工資設定,將不會產生工資紀錄:\n" +
-                                   "\n".join(f"- {n}" for n in unmatched))
-                        st.caption("可至「💰 工資計算 → 📚 工資對照表」新增對應")
-            else:
-                st.info("ℹ 目前所有階段員工皆為「—」,本次出貨將不會產生工資紀錄")
-
-            if st.button("確認出貨", type="primary", use_container_width=True):
-                ok_all = True
-                for x in st.session_state['out_list']:
-                    if not add_transaction("銷售出貨", date.today(), x['sku'], x['wh'],
-                                            x['qty'], user, order_id, final_ship, ship_no):
-                        ok_all = False
-                wage_msg = ""
-                if ok_all and any(stage_keyers.values()):
-                    items_for_wage = [{'product_name': x['name'], 'qty': x['qty']}
-                                      for x in st.session_state['out_list']]
-                    created, skipped, _ = create_wage_entries_for_items(
-                        items_for_wage, stage_keyers, order_id or "", user)
-                    if created > 0:
-                        wage_msg = f",已產生 {created} 筆工資紀錄"
-                    if skipped > 0:
-                        wage_msg += f"({skipped} 筆未對應)"
-                st.session_state['out_list'] = []
-                st.success(f"出貨完成{wage_msg}")
-                time.sleep(1)
-                st.rerun()
-
-    st.divider()
+    prods = get_formatted_product_df()
+    if not prods.empty:
+        col1, col2, col3 = st.columns([3, 1, 1])
+        sel_p = col1.selectbox("挑選商品", prods['label'])
+        wh = col2.selectbox("倉庫", WAREHOUSES, index=3); qty = col3.number_input("數量", 1.0)
+        if st.button("加入待出貨清單"):
+            st.session_state['out_list'].append({'sku': sel_p.split(" | ")[0], 'name': sel_p.split(" | ")[1], 'wh': wh, 'qty': qty})
+            st.rerun()
+    if st.session_state['out_list']:
+        for i, item in enumerate(st.session_state['out_list']):
+            c_l, c_d = st.columns([5, 1])
+            c_l.write(f"**{item['name']}** - {item['wh']} x{item['qty']}")
+            if c_d.button("移除", key=f"rm_o_{i}"): st.session_state['out_list'].pop(i); st.rerun()
+        if st.button("確認出貨", type="primary", use_container_width=True):
+            for x in st.session_state['out_list']:
+                add_transaction("銷售出貨", date.today(), x['sku'], x['wh'], x['qty'], user, order_id, final_ship, ship_no)
+            st.session_state['out_list'] = []; st.success("出貨完成"); time.sleep(1); st.rerun()
     render_history_table("銷售出貨")
 
 # --- 🛒 訂單管理 ---
@@ -1741,8 +912,10 @@ elif page == "🛒 訂單管理":
                     st.session_state["o_cphone"] = str(m['phone'])
                     st.session_state["o_cemail"] = str(m['email'])
                     st.session_state["o_caddr"] = str(m['address'])
+                    st.session_state["o_bday"] = str(m.get('birthday', ''))
+                    st.session_state["o_lbday"] = str(m.get('lunar_birthday', ''))
             else:
-                for k in ["o_cname", "o_cphone", "o_cemail", "o_caddr"]:
+                for k in ["o_cname", "o_cphone", "o_cemail", "o_caddr", "o_bday", "o_lbday"]:
                     st.session_state[k] = ""
 
         cc1, cc2 = st.columns(2)
@@ -1751,6 +924,11 @@ elif page == "🛒 訂單管理":
         cc3, cc4 = st.columns(2)
         cust_email = cc3.text_input("Email", key="o_cemail")
         ship_addr = cc4.text_input("寄送地址", key="o_caddr")
+        bd1, bd2 = st.columns(2)
+        o_birthday = bd1.text_input("🌞 國曆生日 (YYYY/MM/DD)", key="o_bday")
+        o_lunar_bday = bd2.text_input("🌙 農曆生日 (YYYY/MM/DD)", key="o_lbday")
+        if o_birthday:
+            render_numerology_table(o_birthday, o_lunar_bday, key_prefix="new_order")
         o_note = st.text_input("訂單備註", key="o_note")
         o_user = st.selectbox("建立人", ["James", "Imeng", "小幫手"], key="o_user")
 
@@ -1813,7 +991,8 @@ elif page == "🛒 訂單管理":
                         ono, date.today(), cust_name, cust_phone,
                         cust_email, ship_addr,
                         st.session_state['order_items'], o_note, o_user,
-                        o_discount, o_ship_fee
+                        o_discount, o_ship_fee,
+                        o_birthday, o_lunar_bday
                     )
                     if ok:
                         st.session_state['order_items'] = []
@@ -1846,6 +1025,15 @@ elif page == "🛒 訂單管理":
                         dc2.write(f"電話: {row.get('customer_phone', '')}")
                         dc3.write(f"Email: {row.get('customer_email', '')}")
                         st.write(f"地址: {row.get('shipping_address', '')}")
+                        o_bday = str(row.get('birthday', ''))
+                        o_lbday = str(row.get('lunar_birthday', ''))
+                        if o_bday or o_lbday:
+                            bd_txt = f"🌞 國曆: {o_bday}" if o_bday else ""
+                            lb_txt = f"🌙 農曆: {o_lbday}" if o_lbday else ""
+                            st.write(f"{bd_txt}  {lb_txt}")
+                        if o_bday:
+                            with st.container():
+                                render_numerology_table(o_bday, o_lbday, key_prefix=f"{kp}_{ono}")
                         r_disc = float(row.get('discount', 0))
                         r_ship = float(row.get('shipping_fee', 0))
                         r_items = float(row.get('items_total', 0))
@@ -1903,12 +1091,16 @@ elif page == "🛒 訂單管理":
                                 ei3, ei4 = st.columns(2)
                                 e_email = ei3.text_input("Email", value=str(row.get('customer_email', '')))
                                 e_addr = ei4.text_input("地址", value=str(row.get('shipping_address', '')))
+                                ebd1, ebd2 = st.columns(2)
+                                e_bday = ebd1.text_input("🌞 國曆生日", value=str(row.get('birthday', '')))
+                                e_lbday = ebd2.text_input("🌙 農曆生日", value=str(row.get('lunar_birthday', '')))
                                 e_note = st.text_input("備註", value=str(row.get('note', '')))
                                 if st.form_submit_button("💾 儲存客戶資訊", use_container_width=True):
                                     if update_order_fields(ono, {
                                         'customer_name': e_name, 'customer_phone': e_phone,
                                         'customer_email': e_email, 'shipping_address': e_addr,
-                                        'note': e_note
+                                        'note': e_note, 'birthday': e_bday,
+                                        'lunar_birthday': e_lbday
                                     }):
                                         st.success("客戶資訊已更新")
                                         time.sleep(1)
@@ -1934,74 +1126,19 @@ elif page == "🛒 訂單管理":
                         if options:
                             new_st = st.selectbox("變更狀態", options, key=f"{kp}_nst_{ono}")
 
-                            need_ship = (status in ["已確認", "已成立", "待處理",
-                                                     "未付款/未出貨", "處理中",
-                                                     "已付款/未出貨"]
+                            need_ship = (status in ["未付款/未出貨", "處理中", "已付款/未出貨"]
                                          and new_st in ["未付款/已出貨", "已完成"])
-                            stage_keyers = {}
-                            ship_user = None
-                            s_method = ""
-                            s_no = ""
                             if need_ship:
                                 sc1, sc2, sc3 = st.columns(3)
                                 ship_user = sc1.selectbox("出貨經手人", KEYERS, key=f"{kp}_su_{ono}")
                                 s_method = sc2.selectbox("寄送方式", SHIPPING_METHODS, key=f"{kp}_sm_{ono}")
                                 s_no = sc3.text_input("配送號碼", key=f"{kp}_sn_{ono}")
 
-                                # === 工資階段員工指派 ===
-                                st.markdown("**💰 工資階段員工指派(留「—」= 不計薪)**")
-                                sk1, sk2, sk3, sk4 = st.columns(4)
-                                keyer_opts = ["—"] + KEYERS
-                                default_ship_idx = (KEYERS.index(ship_user) + 1) if ship_user in KEYERS else 0
-                                sk_make = sk1.selectbox("製造", keyer_opts, key=f"{kp}_skm_{ono}")
-                                sk_pack = sk2.selectbox("包裝", keyer_opts, key=f"{kp}_skp_{ono}")
-                                sk_ship = sk3.selectbox("出貨", keyer_opts, index=default_ship_idx, key=f"{kp}_sks_{ono}")
-                                sk_svc  = sk4.selectbox("服務費", keyer_opts, key=f"{kp}_skv_{ono}")
-                                stage_keyers = {
-                                    'make': sk_make if sk_make != '—' else '',
-                                    'pack': sk_pack if sk_pack != '—' else '',
-                                    'ship': sk_ship if sk_ship != '—' else '',
-                                    'svc':  sk_svc  if sk_svc  != '—' else '',
-                                }
-
-                                # 工資預覽
-                                if any(stage_keyers.values()) and not items.empty:
-                                    preview = []
-                                    unmatched = []
-                                    total_wage = 0.0
-                                    for _, it in items.iterrows():
-                                        pn = str(it.get('product_name', ''))
-                                        cat = match_wage_catalog(pn)
-                                        if not cat:
-                                            unmatched.append(pn)
-                                            continue
-                                        is_p = is_proxy_product(pn) or is_proxy_product(cat.get('product_name', ''))
-                                        q = float(it['qty'])
-                                        m = (float(cat.get('wage_make', 0)) * q) if stage_keyers['make'] else 0
-                                        p_ = (float(cat.get('wage_pack', 0)) * q) if stage_keyers['pack'] else 0
-                                        s_ = (0 if is_p else float(cat.get('wage_ship', 0)) * q) if stage_keyers['ship'] else 0
-                                        v = (float(cat.get('wage_svc',  0)) * q) if stage_keyers['svc']  else 0
-                                        row_total = m + p_ + s_ + v
-                                        total_wage += row_total
-                                        preview.append({
-                                            '商品': pn, '數量': q,
-                                            '製造': m, '包裝': p_, '出貨': s_, '服務費': v,
-                                            '小計': row_total,
-                                        })
-                                    with st.expander(f"💰 工資預覽 (合計 NT$ {total_wage:,.0f})"):
-                                        if preview:
-                                            st.dataframe(pd.DataFrame(preview),
-                                                         use_container_width=True, hide_index=True)
-                                        if unmatched:
-                                            st.warning("未對應工資設定: " + ", ".join(unmatched))
-
                             ac1, ac2 = st.columns([3, 1])
                             btn_label = "🚚 確認出貨" if need_ship else "✅ 確認變更"
                             if ac1.button(btn_label, key=f"{kp}_apply_{ono}", type="primary"):
                                 if need_ship:
-                                    ok, msg = ship_order(ono, ship_user, s_method, s_no, new_st,
-                                                          stage_keyers=stage_keyers,
-                                                          created_by=ship_user)
+                                    ok, msg = ship_order(ono, ship_user, s_method, s_no, new_st)
                                     if ok:
                                         st.success(msg)
                                         time.sleep(1)
@@ -2066,6 +1203,14 @@ elif page == "🛒 訂單管理":
                     dc2.metric("優惠折扣", f"-${d_disc:,.0f}")
                     dc3.metric("運費", f"${d_ship:,.0f}")
 
+                # === 數字能量顯示 ===
+                det_bday = str(row.get('birthday', ''))
+                det_lbday = str(row.get('lunar_birthday', ''))
+                if det_bday:
+                    st.markdown("---")
+                    st.markdown(f"#### 🔢 數字能量（生日: {det_bday}）")
+                    render_numerology_table(det_bday, det_lbday, key_prefix="detail")
+
                 # === 訂單品項列表 ===
                 st.markdown("---")
                 items = load_order_items(sel_ono)
@@ -2094,6 +1239,9 @@ elif page == "🛒 訂單管理":
                         ei_c3, ei_c4 = st.columns(2)
                         e_email = ei_c3.text_input("Email", value=str(row.get('customer_email', '')))
                         e_addr = ei_c4.text_input("寄送地址", value=str(row.get('shipping_address', '')))
+                        ei_b1, ei_b2 = st.columns(2)
+                        e_bday = ei_b1.text_input("🌞 國曆生日", value=str(row.get('birthday', '')))
+                        e_lbday = ei_b2.text_input("🌙 農曆生日", value=str(row.get('lunar_birthday', '')))
                         e_note = st.text_input("備註", value=str(row.get('note', '')))
                         if st.form_submit_button("💾 儲存客戶資訊", use_container_width=True):
                             updates = {
@@ -2101,7 +1249,9 @@ elif page == "🛒 訂單管理":
                                 'customer_phone': e_phone,
                                 'customer_email': e_email,
                                 'shipping_address': e_addr,
-                                'note': e_note
+                                'note': e_note,
+                                'birthday': e_bday,
+                                'lunar_birthday': e_lbday
                             }
                             if update_order_fields(sel_ono, updates):
                                 st.success("客戶資訊已更新")
@@ -2172,9 +1322,7 @@ elif page == "🛒 訂單管理":
 # --- 👥 會員管理 ---
 elif page == "👥 會員管理":
     st.subheader("👥 會員名單管理")
-    ensure_relations_sheet()
-    tab_m_list, tab_m_add, tab_m_rel = st.tabs(
-        ["📋 會員列表", "手動新增會員", "🔗 關係鏈"])
+    tab_m_list, tab_m_add = st.tabs(["📋 會員列表", "手動新增會員"])
 
     with tab_m_list:
         df_members = load_members()
@@ -2191,15 +1339,13 @@ elif page == "👥 會員管理":
                 filtered_m = filtered_m[mask]
 
             st.markdown(f"共 **{len(filtered_m)}** 位會員")
-            list_cols = ['name', 'phone', 'email', 'birthday', 'birth_time',
-                         'address', 'last_order_date']
-            list_cols = [c for c in list_cols if c in filtered_m.columns]
+            disp_cols = ['name', 'phone', 'email', 'address', 'birthday', 'lunar_birthday', 'last_order_date']
+            disp_cols = [c for c in disp_cols if c in filtered_m.columns]
+            rename_map = {'name': '姓名', 'phone': '電話', 'email': 'Email',
+                          'address': '地址', 'birthday': '國曆生日',
+                          'lunar_birthday': '農曆生日', 'last_order_date': '最後訂單日期'}
             st.dataframe(
-                filtered_m[list_cols].rename(
-                    columns={'name': '姓名', 'phone': '電話', 'email': 'Email',
-                             'birthday': '生日', 'birth_time': '出生時間',
-                             'address': '地址', 'last_order_date': '最後訂單日期'}
-                ),
+                filtered_m[disp_cols].rename(columns=rename_map),
                 use_container_width=True, hide_index=True
             )
 
@@ -2210,21 +1356,22 @@ elif page == "👥 會員管理":
                 sel_m = st.selectbox("選擇會員", m_names, key="m_edit_sel")
                 m_data = find_member_by_name(sel_m)
                 if m_data is not None:
+                    # 顯示數字能量
+                    m_bday = str(m_data.get('birthday', ''))
+                    m_lbday = str(m_data.get('lunar_birthday', ''))
+                    if m_bday:
+                        st.markdown("#### 🔢 數字能量")
+                        render_numerology_table(m_bday, m_lbday, key_prefix="member")
                     with st.form("edit_member"):
-                        em_c1, em_c2 = st.columns(2)
-                        em_phone = em_c1.text_input("電話", value=str(m_data.get('phone', '')))
-                        em_email = em_c2.text_input("Email", value=str(m_data.get('email', '')))
-                        em_c3, em_c4 = st.columns(2)
-                        em_birthday = em_c3.text_input("生日 (格式 2000/01/05)",
-                                                       value=str(m_data.get('birthday', '') or ''),
-                                                       placeholder="2000/01/05")
-                        em_birthtime = em_c4.text_input("出生時間 (例: 14:30 或 不詳)",
-                                                        value=str(m_data.get('birth_time', '') or ''),
-                                                        placeholder="14:30")
+                        em_phone = st.text_input("電話", value=str(m_data.get('phone', '')))
+                        em_email = st.text_input("Email", value=str(m_data.get('email', '')))
                         em_addr = st.text_input("地址", value=str(m_data.get('address', '')))
+                        em_b1, em_b2 = st.columns(2)
+                        em_bday = em_b1.text_input("🌞 國曆生日 (YYYY/MM/DD)", value=m_bday)
+                        em_lbday = em_b2.text_input("🌙 農曆生日 (YYYY/MM/DD)", value=m_lbday)
                         if st.form_submit_button("儲存修改"):
                             save_member(sel_m, em_phone, em_email, em_addr,
-                                        birthday=em_birthday, birth_time=em_birthtime)
+                                        birthday=em_bday, lunar_birthday=em_lbday)
                             st.success("會員資料已更新")
                             time.sleep(1)
                             st.rerun()
@@ -2240,10 +1387,10 @@ elif page == "👥 會員管理":
             am_c1, am_c2 = st.columns(2)
             am_phone = am_c1.text_input("電話")
             am_email = am_c2.text_input("Email")
-            am_c3, am_c4 = st.columns(2)
-            am_birthday = am_c3.text_input("生日 (格式 2000/01/05)", placeholder="2000/01/05")
-            am_birthtime = am_c4.text_input("出生時間 (例: 14:30 或 不詳)", placeholder="14:30")
             am_addr = st.text_input("地址")
+            am_b1, am_b2 = st.columns(2)
+            am_bday = am_b1.text_input("🌞 國曆生日 (YYYY/MM/DD)")
+            am_lbday = am_b2.text_input("🌙 農曆生日 (YYYY/MM/DD)")
             am_note = st.text_input("備註")
             if st.form_submit_button("新增會員", use_container_width=True):
                 if not am_name:
@@ -2253,81 +1400,10 @@ elif page == "👥 會員管理":
                     if existing is not None:
                         st.warning(f"會員 '{am_name}' 已存在，將更新資料")
                     save_member(am_name, am_phone, am_email, am_addr, am_note,
-                                birthday=am_birthday, birth_time=am_birthtime)
+                                birthday=am_bday, lunar_birthday=am_lbday)
                     st.success(f"會員 '{am_name}' 已儲存")
                     time.sleep(1)
                     st.rerun()
-
-    # === 🔗 關係鏈 ===
-    with tab_m_rel:
-        df_members = load_members()
-        if df_members.empty or len(df_members) < 1:
-            st.info("目前沒有會員。請先新增會員後再建立關係。")
-        else:
-            member_names = df_members['name'].astype(str).tolist()
-
-            # --- 建立新關係 ---
-            st.markdown("##### ➕ 建立關係")
-            st.caption("親子類(父子/父女/母子/母女):**會員A 選長輩(父/母)、會員B 選晚輩(子/女)**。"
-                       "其他對稱關係(配偶/朋友等)順序不拘。系統會自動推導反向關係。")
-            with st.form("add_relation_form"):
-                rc1, rc2, rc3 = st.columns([2, 1.2, 2])
-                rel_a = rc1.selectbox("會員 A (親子類請選長輩)", member_names, key="rel_a")
-                rel_type = rc2.selectbox("關係", RELATION_TYPES, key="rel_type")
-                rel_b = rc3.selectbox("會員 B (親子類請選晚輩)", member_names,
-                                      index=min(1, len(member_names) - 1), key="rel_b")
-                rel_note = st.text_input("備註 (選填)", key="rel_note")
-                if st.form_submit_button("建立關係", type="primary"):
-                    ok, msg = add_relation(rel_a, rel_type, rel_b, rel_note)
-                    if ok:
-                        st.success(msg)
-                        time.sleep(1)
-                        st.rerun()
-                    else:
-                        st.warning(msg)
-
-            st.markdown("---")
-
-            # --- 檢視某會員的關係網 ---
-            st.markdown("##### 🔍 檢視會員關係")
-            view_member = st.selectbox("選擇會員", member_names, key="rel_view")
-            rels = get_member_relations(view_member)
-            if not rels:
-                st.info(f"「{view_member}」目前沒有建立任何關係。")
-            else:
-                st.markdown(f"**{view_member}** 共有 {len(rels)} 筆關係:")
-                for rel in rels:
-                    rc1, rc2, rc3 = st.columns([4, 2, 1])
-                    arrow = "↩ (反向推導)" if rel['reverse'] else ""
-                    rc1.write(f"{rel['desc']} {arrow}")
-                    # 顯示對方生日(若有)
-                    tgt = df_members[df_members['name'].astype(str) == rel['target']]
-                    if not tgt.empty:
-                        bd = str(tgt.iloc[0].get('birthday', '') or '')
-                        bt = str(tgt.iloc[0].get('birth_time', '') or '')
-                        info = " / ".join([x for x in [bd, bt] if x])
-                        rc2.caption(f"🎂 {info}" if info else "—")
-                    else:
-                        rc2.caption("(非會員)")
-                    if rc3.button("刪除", key=f"rel_del_{rel['relation_id']}"):
-                        if delete_relation(rel['relation_id']):
-                            st.success("已刪除關係")
-                            time.sleep(0.8)
-                            st.rerun()
-                    if rel['note']:
-                        st.caption(f"　　備註: {rel['note']}")
-
-            # --- 全部關係總表 ---
-            st.markdown("---")
-            with st.expander("📋 所有關係總表"):
-                df_rel = load_relations()
-                if df_rel.empty:
-                    st.caption("尚無任何關係")
-                else:
-                    disp = df_rel[['member_a', 'relation_type', 'member_b', 'note']].rename(
-                        columns={'member_a': '會員 A', 'relation_type': '關係',
-                                 'member_b': '會員 B', 'note': '備註'})
-                    st.dataframe(disp, use_container_width=True, hide_index=True)
 
 # --- 🔨 製造作業 ---
 elif page == "🔨 製造作業":
@@ -2373,235 +1449,6 @@ elif page == "🔨 製造作業":
                     add_transaction("製造領料", date.today(), m.split(" | ")[0], "Wen", -q, "管理員", "拆解回庫")
                     st.success("OK"); time.sleep(1); st.rerun()
     render_history_table(["製造領料", "製造入庫"])
-
-# --- 💰 工資計算 ---
-elif page == "💰 工資計算":
-    st.subheader("💰 工資計算系統 (與出貨/訂單連動)")
-    ensure_wage_sheets()
-
-    tab_summary, tab_entry, tab_list, tab_catalog, tab_export = st.tabs(
-        ["📊 月度報表", "➕ 手動登錄", "📋 工資明細", "📚 工資對照表", "📤 匯出 / 同步"])
-
-    # === 📊 月度報表 ===
-    with tab_summary:
-        ym_default = date.today().strftime("%Y-%m")
-        ym = st.text_input("查詢月份 (YYYY-MM)", value=ym_default, key="w_sum_ym")
-        df_w = load_wage_entries()
-        df_settle = load_wage_settlements()
-        if df_w.empty:
-            st.info("尚無任何工資紀錄。請至「🚚 出貨作業」或「🛒 訂單管理」執行出貨即會自動產生,或在「➕ 手動登錄」新增。")
-        else:
-            df_w['date_str'] = df_w['date'].astype(str)
-            month_df = df_w[df_w['date_str'].str.startswith(ym)].copy()
-            if month_df.empty:
-                st.info(f"{ym} 沒有工資紀錄")
-            else:
-                pivot = month_df.pivot_table(
-                    index='employee_name', columns='stage', values='amount',
-                    aggfunc='sum', fill_value=0
-                )
-                pivot['合計'] = pivot.sum(axis=1)
-                pivot = pivot.reset_index().rename(columns={'employee_name': '員工'})
-                st.dataframe(pivot, use_container_width=True, hide_index=True)
-                grand_total = float(month_df['amount'].sum())
-                cnt_orders = month_df['order_no'].astype(str).replace('', pd.NA).dropna().nunique()
-                m1, m2, m3 = st.columns(3)
-                m1.metric("全月總計", f"NT$ {grand_total:,.0f}")
-                m2.metric("工資筆數", f"{len(month_df)}")
-                m3.metric("涉及訂單數", f"{cnt_orders}")
-
-                # 結算狀態
-                st.markdown("---")
-                settled_row = pd.DataFrame()
-                if not df_settle.empty:
-                    settled_row = df_settle[df_settle['year_month'].astype(str) == ym]
-                if not settled_row.empty:
-                    st.success(f"✓ 已於 {str(settled_row.iloc[0]['settled_at'])[:19]} 由 "
-                               f"{settled_row.iloc[0].get('settled_by', '')} 結算,"
-                               f"金額 NT$ {float(settled_row.iloc[0]['total']):,.0f}")
-                else:
-                    st.warning("此月份尚未結算")
-                    cs1, cs2 = st.columns(2)
-                    settled_by = cs1.selectbox("結算人", KEYERS, key="settle_by")
-                    if cs2.button("📌 標記為已結算", type="primary"):
-                        if mark_month_settled(ym, grand_total, settled_by):
-                            st.success(f"已結算 {ym} (NT$ {grand_total:,.0f})")
-                            time.sleep(1)
-                            st.rerun()
-
-    # === ➕ 手動登錄 ===
-    with tab_entry:
-        st.markdown("適用情境:非由出貨自動產生的工資,例如代點服務費、其他自訂項目。")
-        with st.form("wage_entry_form"):
-            we_c1, we_c2, we_c3 = st.columns(3)
-            we_date = we_c1.date_input("日期", value=date.today())
-            we_emp = we_c2.selectbox("員工", KEYERS)
-            we_stage = we_c3.selectbox("階段 / 類別", ["製造", "包裝", "出貨", "服務費", "其他"])
-            we_c4, we_c5 = st.columns(2)
-            we_item = we_c4.text_input("項目名稱 *必填")
-            we_qty = we_c5.number_input("數量", min_value=0.0, value=1.0, step=1.0)
-            we_c6, we_c7 = st.columns(2)
-            we_price = we_c6.number_input("單價", min_value=0.0, value=0.0, step=10.0)
-            we_amount = we_c7.number_input("金額 (留 0 → 自動 = 數量×單價)", min_value=0.0, value=0.0, step=10.0)
-            we_note = st.text_input("備註")
-            if st.form_submit_button("新增工資紀錄", type="primary"):
-                if not we_item.strip():
-                    st.error("請輸入項目名稱")
-                else:
-                    amount = we_amount if we_amount > 0 else we_qty * we_price
-                    ok = add_wage_entry({
-                        'date': str(we_date),
-                        'employee_name': we_emp,
-                        'category': '產品' if we_stage != '其他' else '其他',
-                        'stage': we_stage if we_stage != '其他' else '',
-                        'item_name': we_item.strip(),
-                        'qty': we_qty,
-                        'price': we_price,
-                        'amount': amount,
-                        'note': we_note,
-                        'order_no': '',
-                        'created_by': we_emp,
-                        'settled': 'N',
-                    })
-                    if ok:
-                        st.success(f"已新增工資紀錄,金額 NT$ {amount:,.0f}")
-                        time.sleep(1)
-                        st.rerun()
-                    else:
-                        st.error("新增失敗,請檢查 Google Sheet 連線")
-
-    # === 📋 工資明細 ===
-    with tab_list:
-        df_w = load_wage_entries()
-        if df_w.empty:
-            st.info("尚無紀錄")
-        else:
-            wlc1, wlc2, wlc3 = st.columns(3)
-            ym2 = wlc1.text_input("月份篩選", value=date.today().strftime("%Y-%m"), key="w_list_ym")
-            emp_filter = wlc2.selectbox("員工", ["全部"] + KEYERS, key="w_list_emp")
-            stage_filter = wlc3.selectbox("階段", ["全部", "製造", "包裝", "出貨", "服務費"], key="w_list_stage")
-            filtered = df_w.copy()
-            if ym2:
-                filtered = filtered[filtered['date'].astype(str).str.startswith(ym2)]
-            if emp_filter != "全部":
-                filtered = filtered[filtered['employee_name'].astype(str) == emp_filter]
-            if stage_filter != "全部":
-                filtered = filtered[filtered['stage'].astype(str) == stage_filter]
-            filtered = filtered.sort_values('date', ascending=False)
-            st.markdown(f"共 **{len(filtered)}** 筆,合計 **NT$ {float(filtered['amount'].sum()):,.0f}**")
-            if filtered.empty:
-                st.info("無符合資料")
-            else:
-                # 表頭
-                hc = st.columns([1.4, 1, 1, 2.5, 0.7, 0.8, 1, 1.5, 0.6])
-                for col, h in zip(hc, ["日期", "員工", "階段", "項目", "數量", "單價",
-                                       "金額", "訂單/備註", " "]):
-                    col.markdown(f"**{h}**")
-                for idx, row in filtered.head(100).iterrows():
-                    c1, c2, c3, c4, c5, c6, c7, c8, c9 = st.columns([1.4, 1, 1, 2.5, 0.7, 0.8, 1, 1.5, 0.6])
-                    c1.text(str(row.get('date', '')))
-                    c2.text(str(row.get('employee_name', '')))
-                    c3.text(str(row.get('stage', '') or '—'))
-                    item_name = str(row.get('item_name', ''))
-                    c4.text(item_name[:18] + ('…' if len(item_name) > 18 else ''))
-                    c5.text(f"{float(row.get('qty', 0)):g}")
-                    c6.text(f"{float(row.get('price', 0)):,.0f}")
-                    c7.text(f"${float(row.get('amount', 0)):,.0f}")
-                    ono = str(row.get('order_no', ''))
-                    note = str(row.get('note', ''))
-                    c8.text((ono or note)[:14])
-                    is_settled = str(row.get('settled', 'N')).upper() == 'Y'
-                    if is_settled:
-                        c9.text("🔒")
-                    else:
-                        eid = str(row.get('entry_id', ''))
-                        if c9.button("🗑", key=f"wd_{eid}_{idx}"):
-                            if delete_wage_entry(eid):
-                                st.success("已刪除")
-                                time.sleep(0.5)
-                                st.rerun()
-                if len(filtered) > 100:
-                    st.caption(f"僅顯示前 100 筆,共 {len(filtered)} 筆。請用篩選縮小範圍。")
-
-    # === 📚 工資對照表 ===
-    with tab_catalog:
-        st.markdown("##### 工資對照表 (產品 → 各階段單價)")
-        st.caption("出貨時系統依此表計算每件商品的製造/包裝/出貨/服務費。代點商品(名稱含「代點」)出貨工資自動為 0。")
-        df_cat = load_wage_catalog()
-        if not df_cat.empty:
-            display = df_cat.rename(columns={
-                'product_name': '產品名稱', 'wage_make': '製造',
-                'wage_pack': '包裝', 'wage_ship': '出貨',
-                'wage_svc': '服務費', 'note': '備註'
-            })
-            st.dataframe(display, use_container_width=True, hide_index=True)
-
-        st.markdown("---")
-        st.markdown("##### 新增 / 修改項目")
-        with st.form("wage_cat_form"):
-            wc_name = st.text_input("產品名稱(會用此名稱比對訂單品名,支援前綴/包含比對)")
-            wcc1, wcc2, wcc3, wcc4 = st.columns(4)
-            wc_make = wcc1.number_input("製造工資", min_value=0.0, value=0.0, step=1.0)
-            wc_pack = wcc2.number_input("包裝工資", min_value=0.0, value=0.0, step=1.0)
-            wc_ship = wcc3.number_input("出貨工資", min_value=0.0, value=0.0, step=1.0)
-            wc_svc  = wcc4.number_input("服務費",   min_value=0.0, value=0.0, step=10.0)
-            wc_note = st.text_input("備註")
-            fc1, fc2 = st.columns(2)
-            submit = fc1.form_submit_button("💾 新增 / 更新", type="primary")
-            delete_it = fc2.form_submit_button("🗑️ 刪除此產品")
-            if submit:
-                if wc_name.strip():
-                    if upsert_wage_catalog(wc_name.strip(), wc_make, wc_pack, wc_ship, wc_svc, wc_note):
-                        st.success("已儲存")
-                        time.sleep(1)
-                        st.rerun()
-                else:
-                    st.error("請輸入產品名稱")
-            if delete_it:
-                if wc_name.strip():
-                    if delete_wage_catalog_item(wc_name.strip()):
-                        st.success("已刪除")
-                        time.sleep(1)
-                        st.rerun()
-
-    # === 📤 匯出 / 同步 ===
-    with tab_export:
-        st.markdown("##### 匯出工資資料給 wage-app")
-        st.caption("提供兩種格式: CSV(報表用) / wage-app JSON(可直接在 wage-app「資料備份 → 匯入 JSON 備份」載入)")
-        ex_ym = st.text_input("匯出月份(留空 = 全部)",
-                              value=date.today().strftime("%Y-%m"), key="ex_ym")
-        df_w_all = load_wage_entries()
-        if df_w_all.empty:
-            st.info("尚無資料可匯出")
-        else:
-            export_df = df_w_all.copy()
-            if ex_ym.strip():
-                export_df = export_df[export_df['date'].astype(str).str.startswith(ex_ym.strip())]
-            st.markdown(f"範圍內共 **{len(export_df)}** 筆,"
-                        f"合計 **NT$ {float(export_df['amount'].sum()):,.0f}**")
-            ec1, ec2 = st.columns(2)
-            csv_data = export_df.to_csv(index=False).encode('utf-8-sig')
-            ec1.download_button("📄 下載 CSV", csv_data,
-                                file_name=f"wage_{ex_ym or 'all'}.csv",
-                                mime='text/csv', use_container_width=True)
-            import json as _json
-            json_state = build_wage_app_json(export_df if ex_ym.strip() else df_w_all)
-            ec2.download_button("📦 下載 wage-app JSON",
-                                _json.dumps(json_state, ensure_ascii=False, indent=2).encode('utf-8'),
-                                file_name=f"numbertalk_wage_backup_{ex_ym or 'all'}.json",
-                                mime='application/json', use_container_width=True)
-
-        st.markdown("---")
-        st.markdown("##### Google Sheet 公開 CSV URL (給 wage-app 直接拉取)")
-        st.caption("到 Google Sheet → 檔案 → 共用 → 「具有連結的任何人皆可檢視」,然後 wage-app 訂單匯入頁可貼下方 URL 直接抓資料。")
-        sh = get_spreadsheet()
-        if sh:
-            try:
-                sid = sh.id
-                csv_url = f"https://docs.google.com/spreadsheets/d/{sid}/gviz/tq?tqx=out:csv&sheet=WageEntries"
-                st.code(csv_url, language=None)
-            except Exception:
-                st.caption("(無法取得 Sheet ID)")
 
 # --- 📊 報表查詢 ---
 elif page == "📊 報表查詢":
