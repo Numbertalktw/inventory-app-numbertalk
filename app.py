@@ -728,57 +728,67 @@ def find_member_by_name(name):
 
 def save_member(name, phone, email, address, note="", birthday="", lunar_birthday="", birth_time=""):
     ensure_members_sheet()
-    ensure_extra_columns()
     ws = get_worksheet_for_write("Members")
     if not ws:
         return False
     try:
-        existing = load_members()
-        if not existing.empty:
-            match = existing[existing['name'].astype(str) == str(name)]
-            if not match.empty:
-                all_vals = ws.get_all_values()
-                header = all_vals[0]
-                name_idx = header.index("name")
-                for i, row in enumerate(all_vals[1:], 2):
-                    if str(row[name_idx]) == str(name):
-                        ph_idx = header.index("phone")
-                        em_idx = header.index("email")
-                        ad_idx = header.index("address")
-                        dt_idx = header.index("last_order_date")
-                        if phone:
-                            ws.update_cell(i, ph_idx + 1, phone)
-                        if email:
-                            ws.update_cell(i, em_idx + 1, email)
-                        if address:
-                            ws.update_cell(i, ad_idx + 1, address)
-                        ws.update_cell(i, dt_idx + 1, str(date.today()))
-                        if birthday and "birthday" in header:
-                            bd_idx = header.index("birthday")
-                            ws.update_cell(i, bd_idx + 1, str(birthday))
-                        if lunar_birthday and "lunar_birthday" in header:
-                            lb_idx = header.index("lunar_birthday")
-                            ws.update_cell(i, lb_idx + 1, str(lunar_birthday))
-                        if birth_time and "birth_time" in header:
-                            bt_idx = header.index("birth_time")
-                            ws.update_cell(i, bt_idx + 1, str(birth_time))
-                        clear_cache()
-                        return True
-        mid = f"M-{int(time.time()) % 100000:05d}"
+        # 先確保所有必要欄位都在 header 裡
         header = ws.row_values(1)
-        row_data = [''] * len(header)
-        col_map = {h: i for i, h in enumerate(header)}
-        for k, v in [('member_id', mid), ('name', name), ('phone', phone),
-                     ('email', email), ('address', address), ('note', note),
-                     ('created_at', str(datetime.now())), ('last_order_date', str(date.today())),
-                     ('birthday', str(birthday)), ('lunar_birthday', str(lunar_birthday)),
-                     ('birth_time', str(birth_time))]:
-            if k in col_map:
-                row_data[col_map[k]] = v
-        ws.append_row(row_data)
-        clear_cache()
-        return True
-    except Exception:
+        for needed_col in ["birthday", "lunar_birthday", "birth_time"]:
+            if needed_col not in header:
+                ws.update_cell(1, len(header) + 1, needed_col)
+                header.append(needed_col)
+        col_map = {h: i + 1 for i, h in enumerate(header)}  # 1-based column index
+
+        # 檢查會員是否已存在
+        all_vals = ws.get_all_values()
+        found_row = -1
+        if len(all_vals) > 1:
+            name_col = col_map.get("name", 2)
+            for i, row in enumerate(all_vals[1:], 2):
+                cell_val = row[name_col - 1] if len(row) >= name_col else ""
+                if str(cell_val) == str(name):
+                    found_row = i
+                    break
+
+        if found_row > 0:
+            # === 更新既有會員 ===
+            updates = {}
+            if phone:
+                updates["phone"] = phone
+            if email:
+                updates["email"] = email
+            if address:
+                updates["address"] = address
+            updates["last_order_date"] = str(date.today())
+            if birthday:
+                updates["birthday"] = str(birthday)
+            if lunar_birthday:
+                updates["lunar_birthday"] = str(lunar_birthday)
+            if birth_time:
+                updates["birth_time"] = str(birth_time)
+            for field_name, field_value in updates.items():
+                if field_name in col_map:
+                    ws.update_cell(found_row, col_map[field_name], field_value)
+            clear_cache()
+            return True
+        else:
+            # === 新增會員 ===
+            mid = f"M-{int(time.time()) % 100000:05d}"
+            row_data = [''] * len(header)
+            idx_map = {h: i for i, h in enumerate(header)}
+            for k, v in [('member_id', mid), ('name', name), ('phone', phone),
+                         ('email', email), ('address', address), ('note', note),
+                         ('created_at', str(datetime.now())), ('last_order_date', str(date.today())),
+                         ('birthday', str(birthday)), ('lunar_birthday', str(lunar_birthday)),
+                         ('birth_time', str(birth_time))]:
+                if k in idx_map:
+                    row_data[idx_map[k]] = v
+            ws.append_row(row_data)
+            clear_cache()
+            return True
+    except Exception as e:
+        st.error(f"會員儲存失敗: {e}")
         return False
 
 def delete_member(name):
@@ -1503,11 +1513,14 @@ elif page == "👥 會員管理":
                         em_lbday = em_b2.text_input("🌙 農曆生日 (YYYY/MM/DD)", value=m_lbday)
                         em_btime = em_b3.text_input("🕐 出生時間 (HH:MM)", value=m_btime)
                         if st.form_submit_button("儲存修改"):
-                            save_member(sel_m, em_phone, em_email, em_addr,
-                                        birthday=em_bday, lunar_birthday=em_lbday, birth_time=em_btime)
-                            st.success("會員資料已更新")
-                            time.sleep(1)
-                            st.rerun()
+                            ok = save_member(sel_m, em_phone, em_email, em_addr,
+                                             birthday=em_bday, lunar_birthday=em_lbday, birth_time=em_btime)
+                            if ok:
+                                st.success("會員資料已更新")
+                                time.sleep(1)
+                                st.rerun()
+                            else:
+                                st.error("儲存失敗，請重試")
                     if st.button("刪除此會員", key="m_del"):
                         delete_member(sel_m)
                         st.success("已刪除")
