@@ -1590,6 +1590,20 @@ elif page == "🛒 訂單管理":
                                         time.sleep(1)
                                         st.rerun()
 
+                        # === 補建工資（已完成訂單專用）===
+                        if status == "已完成":
+                            st.markdown("---")
+                            if st.button("💰 補建工資紀錄", key=f"{kp}_wage_{ono}",
+                                         help="根據產品目錄設定，為此訂單補建工資紀錄"):
+                                w_cnt = auto_create_wage_entries_for_order(
+                                    ono, row.get('order_date', date.today()), "")
+                                if w_cnt > 0:
+                                    st.success(f"✅ 已補建 {w_cnt} 筆工資紀錄")
+                                else:
+                                    st.warning("⚠️ 未建立任何工資紀錄，請確認「工資管理 → 產品目錄」已設定負責員工")
+                                time.sleep(1)
+                                st.rerun()
+
             def apply_search(df, q):
                 if not q:
                     return df
