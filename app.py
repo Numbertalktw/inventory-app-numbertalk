@@ -914,11 +914,16 @@ DEFAULT_WAGE_CATALOG = [
 WAGE_STAGES = ["製造", "包裝", "出貨", "服務費"]
 
 def ensure_wage_sheets():
-    """確保工資相關工作表存在，不存在則自動建立"""
+    """確保工資相關工作表存在，不存在則自動建立（使用新鮮連線避免 token 過期）"""
     import uuid as _uuid
-    sh = get_spreadsheet()
-    if not sh:
+    client = get_fresh_client()
+    if not client:
         st.error("無法連接 Google Sheets，請確認設定")
+        return
+    try:
+        sh = client.open(SPREADSHEET_NAME)
+    except Exception as e:
+        st.error(f"開啟試算表失敗：{e}")
         return
 
     existing_titles = [ws.title for ws in sh.worksheets()]
