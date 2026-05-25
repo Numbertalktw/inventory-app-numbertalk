@@ -424,21 +424,20 @@ def ensure_extra_columns():
     if st.session_state.get('_extra_cols_ok'):
         return
     try:
-        for sheet_name, needed_cols in [
-            ("Orders", ["birthday", "lunar_birthday", "birth_time"]),
-            ("Members", ["birthday", "lunar_birthday", "birth_time"]),
-        ]:
+        for sheet_name in ["Orders", "Members"]:
             ws = get_worksheet(sheet_name)
             if not ws:
                 continue
             header = ws.row_values(1)
-            for col_name in needed_cols:
-                if col_name not in header:
-                    ws_w = get_worksheet_for_write(sheet_name)
-                    if ws_w:
-                        new_header = ws_w.row_values(1)
-                        if col_name not in new_header:
-                            ws_w.update_cell(1, len(new_header) + 1, col_name)
+            missing = [c for c in ["birthday", "lunar_birthday", "birth_time"] if c not in header]
+            if missing:
+                ws_w = get_worksheet_for_write(sheet_name)
+                if ws_w:
+                    cur_header = ws_w.row_values(1)
+                    for col_name in missing:
+                        if col_name not in cur_header:
+                            ws_w.update_cell(1, len(cur_header) + 1, col_name)
+                            cur_header.append(col_name)
         st.session_state['_extra_cols_ok'] = True
     except Exception:
         pass
@@ -728,62 +727,82 @@ def find_member_by_name(name):
 
 def save_member(name, phone, email, address, note="", birthday="", lunar_birthday="", birth_time=""):
     ensure_members_sheet()
-    ws = get_worksheet_for_write("Members")
-    if not ws:
+    try:
+        client = get_fresh_client()
+        if not client:
+            st.error("Google 連線失敗，請點左側「刷新資料」後重試")
+            return False
+        sh = client.open(SPREADSHEET_NAME)
+        ws = sh.worksheet("Members")
+    except Exception as e:
+        st.error(f"無法開啟 Members 工作表: {e}")
         return False
     try:
-        # 先確保所有必要欄位都在 header 裡
-        header = ws.row_values(1)
+        # 一次讀取所有資料（只用 1 次 API）
+        all_vals = ws.get_all_values()
+        header = all_vals[0] if all_vals else []
+
+        # 確保欄位存在（只在缺少時才寫入）
+        cols_added = False
         for needed_col in ["birthday", "lunar_birthday", "birth_time"]:
             if needed_col not in header:
                 ws.update_cell(1, len(header) + 1, needed_col)
                 header.append(needed_col)
-        col_map = {h: i + 1 for i, h in enumerate(header)}  # 1-based column index
+                cols_added = True
+        if cols_added:
+            all_vals = ws.get_all_values()
+            header = all_vals[0]
 
-        # 檢查會員是否已存在
-        all_vals = ws.get_all_values()
+        col_map = {h: idx for idx, h in enumerate(header)}  # 0-based index
+        name_idx = col_map.get("name", 1)
+
+        # 找會員
         found_row = -1
-        if len(all_vals) > 1:
-            name_col = col_map.get("name", 2)
-            for i, row in enumerate(all_vals[1:], 2):
-                cell_val = row[name_col - 1] if len(row) >= name_col else ""
-                if str(cell_val) == str(name):
-                    found_row = i
-                    break
+        found_data = None
+        for i in range(1, len(all_vals)):
+            row = all_vals[i]
+            cell_val = row[name_idx] if len(row) > name_idx else ""
+            if str(cell_val) == str(name):
+                found_row = i + 1  # 1-based sheet row number
+                found_data = list(row)
+                break
 
         if found_row > 0:
-            # === 更新既有會員 ===
-            updates = {}
+            # === 更新既有會員（整行寫入，只用 1 次 API）===
+            while len(found_data) < len(header):
+                found_data.append('')
+            field_updates = {
+                'last_order_date': str(date.today()),
+            }
             if phone:
-                updates["phone"] = phone
+                field_updates['phone'] = phone
             if email:
-                updates["email"] = email
+                field_updates['email'] = email
             if address:
-                updates["address"] = address
-            updates["last_order_date"] = str(date.today())
+                field_updates['address'] = address
             if birthday:
-                updates["birthday"] = str(birthday)
+                field_updates['birthday'] = str(birthday)
             if lunar_birthday:
-                updates["lunar_birthday"] = str(lunar_birthday)
+                field_updates['lunar_birthday'] = str(lunar_birthday)
             if birth_time:
-                updates["birth_time"] = str(birth_time)
-            for field_name, field_value in updates.items():
-                if field_name in col_map:
-                    ws.update_cell(found_row, col_map[field_name], field_value)
+                field_updates['birth_time'] = str(birth_time)
+            for fname, fval in field_updates.items():
+                if fname in col_map:
+                    found_data[col_map[fname]] = fval
+            ws.update(f'A{found_row}', [found_data], value_input_option='RAW')
             clear_cache()
             return True
         else:
             # === 新增會員 ===
             mid = f"M-{int(time.time()) % 100000:05d}"
             row_data = [''] * len(header)
-            idx_map = {h: i for i, h in enumerate(header)}
             for k, v in [('member_id', mid), ('name', name), ('phone', phone),
                          ('email', email), ('address', address), ('note', note),
                          ('created_at', str(datetime.now())), ('last_order_date', str(date.today())),
                          ('birthday', str(birthday)), ('lunar_birthday', str(lunar_birthday)),
                          ('birth_time', str(birth_time))]:
-                if k in idx_map:
-                    row_data[idx_map[k]] = v
+                if k in col_map:
+                    row_data[col_map[k]] = v
             ws.append_row(row_data)
             clear_cache()
             return True
