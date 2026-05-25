@@ -78,7 +78,7 @@ def parse_birthday(bday_str):
     return None
 
 def render_numerology_table(bday_str, lunar_bday_str="", key_prefix=""):
-    """顯示三年流年 x 階段數對照表（國曆 + 農曆並排）"""
+    """參考 IF Crystal 格式：顯示三年流年 x 階段數對照表（國曆 + 農曆並排）"""
     parsed = parse_birthday(bday_str)
     if not parsed:
         st.info("請輸入生日（格式: YYYY/MM/DD）以顯示數字能量")
@@ -97,12 +97,14 @@ def render_numerology_table(bday_str, lunar_bday_str="", key_prefix=""):
         lunar_jieduan = calc_jieduan(ly, lm)
         lunar_jd_final = lunar_jieduan.split("/")[-1]
 
+    st.markdown("##### 📊 流年 × 階段數 三年對照表")
+
     col_solar, col_lunar = st.columns(2)
     with col_solar:
-        st.markdown(f"**🌞 國曆階段數：** `{jd_final}` （{by}年 + {bm}月 → {jieduan}）")
+        st.markdown(f"**🌞 國曆階段數：** `{jd_final}`　（{by}年 + {bm}月 → {jieduan}）")
     with col_lunar:
         if lunar_parsed:
-            st.markdown(f"**🌙 農曆階段數：** `{lunar_jd_final}` （{ly}年 + {lm}月 → {lunar_jieduan}）")
+            st.markdown(f"**🌙 農曆階段數：** `{lunar_jd_final}`　（{ly}年 + {lm}月 → {lunar_jieduan}）")
         else:
             st.markdown("**🌙 農曆階段數：** *未填寫農曆生日*")
 
@@ -112,11 +114,13 @@ def render_numerology_table(bday_str, lunar_bday_str="", key_prefix=""):
         ln_final = ln.split("/")[-1]
         row_data = {
             "年份": f"{yr}（{lbl}）",
-            "流年計算": f"{yr}年+{bm}月+{bd}日 → {ln}",
+            "流年計算": f"{yr}年 + {bm}月 + {bd}日 → {ln}",
             "流年數": ln_final,
+            "國曆階段數計算": f"{by}年 + {bm}月 → {jieduan}",
             "國曆階段數": jd_final,
         }
         if lunar_parsed:
+            row_data["農曆階段數計算"] = f"{ly}年 + {lm}月 → {lunar_jieduan}"
             row_data["農曆階段數"] = lunar_jd_final
         rows.append(row_data)
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
