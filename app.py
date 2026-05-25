@@ -947,12 +947,7 @@ def ensure_wage_sheets():
             ws_cat.append_row(["name", "wageMake", "wagePack", "wageShip", "wageSvc", "empMake", "empPack", "empShip"])
             for p in DEFAULT_WAGE_CATALOG:
                 ws_cat.append_row([p["name"], p["wageMake"], p["wagePack"], p["wageShip"], p["wageSvc"], "", "", ""])
-        else:
-            # 補上新欄位（若舊工作表缺少）
-            for col_name in ["empMake", "empPack", "empShip"]:
-                if col_name not in header:
-                    ws_cat.update_cell(1, len(header) + 1, col_name)
-                    header.append(col_name)
+        # 若既有工作表缺少員工欄位，save_wage_product 儲存時會自動補上
 
     # WageEntries
     if "WageEntries" not in existing_titles:
@@ -1054,14 +1049,43 @@ def delete_wage_employee(name):
 
 def save_wage_product(product_name, wage_make=0, wage_pack=0, wage_ship=0, wage_svc=0, emp_make="", emp_pack="", emp_ship=""):
     ws = get_worksheet_for_write("WageCatalog")
+    if not ws:
+        return False
     data = ws.get_all_values()
-    header = data[0] if data else []
+    header = list(data[0]) if data else []
+
+    # 若缺少員工欄位，自動補上到標題列
+    all_needed = ["name", "wageMake", "wagePack", "wageShip", "wageSvc", "empMake", "empPack", "empShip"]
+    for col_name in ["empMake", "empPack", "empShip"]:
+        if col_name not in header:
+            header.append(col_name)
+            ws.update_cell(1, len(header), col_name)
+
+    # 建立欄位名稱→索引對照表（1-based）
+    col_idx = {h: i + 1 for i, h in enumerate(header)}
+
+    field_map = {
+        "wageMake": wage_make, "wagePack": wage_pack,
+        "wageShip": wage_ship, "wageSvc": wage_svc,
+        "empMake": emp_make, "empPack": emp_pack, "empShip": emp_ship,
+    }
+
+    # 更新既有行
     for i, row in enumerate(data[1:], start=2):
         if row and row[0] == product_name:
-            ws.update(f"B{i}:H{i}", [[wage_make, wage_pack, wage_ship, wage_svc, emp_make, emp_pack, emp_ship]])
+            for field, val in field_map.items():
+                if field in col_idx:
+                    ws.update_cell(i, col_idx[field], val)
             clear_cache()
             return True
-    ws.append_row([product_name, wage_make, wage_pack, wage_ship, wage_svc, emp_make, emp_pack, emp_ship])
+
+    # 新增一行
+    new_row = [""] * len(header)
+    new_row[col_idx.get("name", 1) - 1] = product_name
+    for field, val in field_map.items():
+        if field in col_idx:
+            new_row[col_idx[field] - 1] = val
+    ws.append_row(new_row)
     clear_cache()
     return True
 
