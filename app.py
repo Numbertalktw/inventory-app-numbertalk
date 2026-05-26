@@ -77,6 +77,23 @@ def parse_birthday(bday_str):
             pass
     return None
 
+def format_phone(phone_val):
+    """確保電話號碼保留前導零（台灣手機 09xx）"""
+    s = str(phone_val).strip()
+    if not s or s in ('', 'nan', 'None', '0', '0.0'):
+        return ''
+    # 移除小數點（Google Sheets 可能存成 9.19515513E8 之類）
+    if '.' in s:
+        try:
+            s = str(int(float(s)))
+        except (ValueError, OverflowError):
+            pass
+    # 如果是純數字、長度 9、以 9 開頭 → 台灣手機號碼缺少前導 0
+    digits = s.replace('-', '').replace(' ', '')
+    if digits.isdigit() and len(digits) == 9 and digits.startswith('9'):
+        return '0' + digits
+    return s
+
 def render_numerology_table(bday_str, lunar_bday_str="", key_prefix=""):
     """參考 IF Crystal 格式：顯示三年流年 x 階段數對照表（國曆 + 農曆並排）"""
     parsed = parse_birthday(bday_str)
@@ -475,7 +492,7 @@ def create_order(order_no, order_date, customer_name, customer_phone,
         for k, v in field_vals.items():
             if k in col_map:
                 row_data[col_map[k]] = v
-        ws_orders.append_row(row_data)
+        ws_orders.append_row(row_data, value_input_option='RAW')
         for item in items:
             ws_items.append_row([
                 order_no, item['sku'], item['product_name'],
@@ -506,6 +523,8 @@ def load_orders():
     for col in ['birthday', 'lunar_birthday', 'birth_time']:
         if col not in df.columns:
             df[col] = ""
+    if 'customer_phone' in df.columns:
+        df['customer_phone'] = df['customer_phone'].apply(format_phone)
     return df
 
 def load_order_items(order_no=None):
@@ -720,6 +739,8 @@ def load_members():
     for col in ['birthday', 'lunar_birthday', 'birth_time']:
         if col not in df.columns:
             df[col] = ""
+    if 'phone' in df.columns:
+        df['phone'] = df['phone'].apply(format_phone)
     return df
 
 def find_member_by_name(name):
@@ -811,7 +832,7 @@ def save_member(name, phone, email, address, note="", birthday="", lunar_birthda
                          ('birth_time', str(birth_time))]:
                 if k in col_map:
                     row_data[col_map[k]] = v
-            ws.append_row(row_data)
+            ws.append_row(row_data, value_input_option='RAW')
             clear_cache()
             return True
     except Exception as e:
