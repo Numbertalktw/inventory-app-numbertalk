@@ -996,6 +996,11 @@ def load_wage_catalog():
         'emp_pack': 'empPack',
         'emp_ship': 'empShip',
     }
+    # load_data() 會自動補空的 'name' 欄位給所有 sheets；
+    # 若 WageCatalog 實際使用 product_name，改名前必須先刪除這個空佔位欄，
+    # 否則會出現兩個 'name' 欄導致 df['name'] 回傳 DataFrame 而非 Series。
+    if 'product_name' in df.columns and 'name' in df.columns:
+        df = df.drop(columns=['name'])
     df = df.rename(columns={k: v for k, v in col_map.items() if k in df.columns})
 
     if 'name' not in df.columns:
