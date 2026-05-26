@@ -982,11 +982,30 @@ def load_wage_employees():
 
 def load_wage_catalog():
     df = load_data("WageCatalog")
-    if df.empty or 'name' not in df.columns:
+    if df.empty:
         return pd.DataFrame(DEFAULT_WAGE_CATALOG)
+
+    # 自動對應 Google Sheets 的舊欄位名稱（product_name / wage_make 等）
+    col_map = {
+        'product_name': 'name',
+        'wage_make': 'wageMake',
+        'wage_pack': 'wagePack',
+        'wage_ship': 'wageShip',
+        'wage_svc': 'wageSvc',
+        'emp_make': 'empMake',
+        'emp_pack': 'empPack',
+        'emp_ship': 'empShip',
+    }
+    df = df.rename(columns={k: v for k, v in col_map.items() if k in df.columns})
+
+    if 'name' not in df.columns:
+        return pd.DataFrame(DEFAULT_WAGE_CATALOG)
+
     for col in ["wageMake", "wagePack", "wageShip", "wageSvc"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+        else:
+            df[col] = 0
     for col in ["empMake", "empPack", "empShip"]:
         if col not in df.columns:
             df[col] = ""
@@ -1059,37 +1078,60 @@ def save_wage_product(product_name, wage_make=0, wage_pack=0, wage_ship=0, wage_
     data = ws.get_all_values()
     header = list(data[0]) if data else []
 
-    # 若缺少員工欄位，自動補上到標題列
-    all_needed = ["name", "wageMake", "wagePack", "wageShip", "wageSvc", "empMake", "empPack", "empShip"]
-    for col_name in ["empMake", "empPack", "empShip"]:
-        if col_name not in header:
-            header.append(col_name)
-            ws.update_cell(1, len(header), col_name)
-
-    # 建立欄位名稱→索引對照表（1-based）
+    # 支援新舊兩種欄位名稱（Google Sheets 可能用 wage_make 或 wageMake）
+    _col_aliases = {
+        "name":     ["name", "product_name"],
+        "wageMake": ["wageMake", "wage_make"],
+        "wagePack": ["wagePack", "wage_pack"],
+        "wageShip": ["wageShip", "wage_ship"],
+        "wageSvc":  ["wageSvc",  "wage_svc"],
+        "empMake":  ["empMake",  "emp_make"],
+        "empPack":  ["empPack",  "emp_pack"],
+        "empShip":  ["empShip",  "emp_ship"],
+    }
     col_idx = {h: i + 1 for i, h in enumerate(header)}
+
+    def _find_col(field):
+        """依照新舊別名尋找實際欄位索引，找不到回傳 None"""
+        for alias in _col_aliases.get(field, [field]):
+            if alias in col_idx:
+                return col_idx[alias]
+        return None
+
+    # 若缺少員工欄位（新舊名稱都沒有），自動補上
+    for new_name, old_name in [("empMake", "emp_make"), ("empPack", "emp_pack"), ("empShip", "emp_ship")]:
+        if new_name not in header and old_name not in header:
+            header.append(new_name)
+            ws.update_cell(1, len(header), new_name)
+            col_idx[new_name] = len(header)
 
     field_map = {
         "wageMake": wage_make, "wagePack": wage_pack,
-        "wageShip": wage_ship, "wageSvc": wage_svc,
-        "empMake": emp_make, "empPack": emp_pack, "empShip": emp_ship,
+        "wageShip": wage_ship, "wageSvc":  wage_svc,
+        "empMake":  emp_make,  "empPack":  emp_pack, "empShip": emp_ship,
     }
 
-    # 更新既有行
+    # 更新既有行（第一欄即產品名，無論欄位叫 name 或 product_name）
     for i, row in enumerate(data[1:], start=2):
         if row and row[0] == product_name:
             for field, val in field_map.items():
-                if field in col_idx:
-                    ws.update_cell(i, col_idx[field], val)
+                c = _find_col(field)
+                if c is not None:
+                    ws.update_cell(i, c, val)
             clear_cache()
             return True
 
     # 新增一行
     new_row = [""] * len(header)
-    new_row[col_idx.get("name", 1) - 1] = product_name
+    name_col = _find_col("name")
+    if name_col:
+        new_row[name_col - 1] = product_name
+    else:
+        new_row[0] = product_name          # fallback：放第一欄
     for field, val in field_map.items():
-        if field in col_idx:
-            new_row[col_idx[field] - 1] = val
+        c = _find_col(field)
+        if c is not None:
+            new_row[c - 1] = val
     ws.append_row(new_row)
     clear_cache()
     return True
