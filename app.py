@@ -1351,33 +1351,133 @@ elif page == "📥 進貨作業":
 
 # --- 🚚 出貨作業 ---
 elif page == "🚚 出貨作業":
-    st.subheader("🚚 銷售出貨 (多品項清單)")
+    st.subheader("🚚 出貨作業")
     if 'out_list' not in st.session_state: st.session_state['out_list'] = []
-    col_a, col_b, col_c = st.columns(3)
-    ship_opt = col_a.selectbox("寄送方式", SHIPPING_METHODS + ["手動輸入..."])
-    final_ship = col_a.text_input("自訂方式") if ship_opt == "手動輸入..." else ship_opt
-    ship_no = col_b.text_input("配送號碼")
-    user = col_c.selectbox("經手人", KEYERS, index=3)
-    order_id = st.text_input("訂單編號 / 備註")
-    st.divider()
-    prods = get_formatted_product_df()
-    if not prods.empty:
-        col1, col2, col3 = st.columns([3, 1, 1])
-        sel_p = col1.selectbox("挑選商品", prods['label'])
-        wh = col2.selectbox("倉庫", WAREHOUSES, index=3); qty = col3.number_input("數量", 1.0)
-        if st.button("加入待出貨清單"):
-            st.session_state['out_list'].append({'sku': sel_p.split(" | ")[0], 'name': sel_p.split(" | ")[1], 'wh': wh, 'qty': qty})
-            st.rerun()
-    if st.session_state['out_list']:
-        for i, item in enumerate(st.session_state['out_list']):
-            c_l, c_d = st.columns([5, 1])
-            c_l.write(f"**{item['name']}** - {item['wh']} x{item['qty']}")
-            if c_d.button("移除", key=f"rm_o_{i}"): st.session_state['out_list'].pop(i); st.rerun()
-        if st.button("確認出貨", type="primary", use_container_width=True):
-            for x in st.session_state['out_list']:
-                add_transaction("銷售出貨", date.today(), x['sku'], x['wh'], x['qty'], user, order_id, final_ship, ship_no)
-            st.session_state['out_list'] = []; st.success("出貨完成"); time.sleep(1); st.rerun()
-    render_history_table("銷售出貨")
+
+    tab_order_ship, tab_manual_ship = st.tabs(["📋 訂單出貨", "📦 散客出貨"])
+
+    # ── 訂單出貨（新功能）──────────────────────────────────────
+    with tab_order_ship:
+        st.markdown("##### 選擇訂單 → 出貨扣庫存 → 自動建立出貨工資")
+        df_orders_ship = load_orders()
+        if df_orders_ship.empty:
+            st.info("目前沒有任何訂單")
+        else:
+            shippable = df_orders_ship[df_orders_ship['status'].isin(
+                ["已確認", "未付款/未出貨", "已付款/未出貨"])]
+            if shippable.empty:
+                st.info("沒有待出貨的訂單")
+            else:
+                order_labels_ship = (
+                    shippable['order_no'].astype(str) + " | " +
+                    shippable['customer_name'].astype(str) + " | $" +
+                    shippable['total_amount'].astype(int).astype(str) + " | " +
+                    shippable['status'].astype(str)
+                ).tolist()
+                sel_ship_order = st.selectbox("選擇訂單", order_labels_ship, key="ship_order_sel")
+                sel_ship_ono = sel_ship_order.split(" | ")[0]
+                sel_ship_row = shippable[shippable['order_no'].astype(str) == sel_ship_ono].iloc[0]
+
+                # 顯示訂單摘要
+                si1, si2, si3 = st.columns(3)
+                si1.write(f"**客戶:** {sel_ship_row.get('customer_name', '')}")
+                si2.write(f"**地址:** {sel_ship_row.get('shipping_address', '')}")
+                si3.write(f"**總額:** ${sel_ship_row.get('total_amount', 0):,.0f}")
+
+                items_ship = load_order_items(sel_ship_ono)
+                if not items_ship.empty:
+                    st.markdown("##### 出貨品項")
+                    st.dataframe(
+                        items_ship[['product_name', 'qty', 'warehouse']].rename(
+                            columns={'product_name': '品名', 'qty': '數量', 'warehouse': '倉庫'}),
+                        use_container_width=True, hide_index=True
+                    )
+
+                ship_c1, ship_c2, ship_c3 = st.columns(3)
+                ship_method = ship_c1.selectbox("寄送方式", SHIPPING_METHODS, key="ship_o_method")
+                ship_tracking = ship_c2.text_input("配送號碼", key="ship_o_tracking")
+                ship_user = ship_c3.selectbox("出貨人員", KEYERS, key="ship_o_user")
+
+                # 判斷目標狀態
+                cur_status = str(sel_ship_row.get('status', ''))
+                if cur_status == "已付款/未出貨":
+                    target_st = "已完成"
+                else:
+                    target_st = "未付款/已出貨"
+                st.info(f"出貨後訂單狀態將更新為：**{target_st}**")
+
+                if st.button("🚚 確認出貨", type="primary", use_container_width=True, key="ship_o_confirm"):
+                    if items_ship.empty:
+                        st.error("此訂單沒有品項")
+                    else:
+                        # 1. 執行出貨（扣庫存 + 更新訂單狀態）
+                        ok, msg = ship_order(sel_ship_ono, ship_user, ship_method, ship_tracking, target_st)
+                        if ok:
+                            # 2. 自動建立出貨工資
+                            df_cat_ship = load_wage_catalog()
+                            wage_count = 0
+                            for _, item in items_ship.iterrows():
+                                product_name = str(item.get('product_name', ''))
+                                qty = float(item.get('qty', 1) or 1)
+                                cat_match = df_cat_ship[df_cat_ship['name'] == product_name] if not df_cat_ship.empty else pd.DataFrame()
+                                if cat_match.empty and not df_cat_ship.empty:
+                                    cat_match = df_cat_ship[df_cat_ship['name'].str.contains(product_name[:8], na=False, regex=False)]
+                                if not cat_match.empty:
+                                    cat_row = cat_match.iloc[0]
+                                    w_ship = float(cat_row.get('wageShip', 0) or 0)
+                                    if w_ship > 0:
+                                        add_wage_entry(
+                                            date.today().isoformat(), ship_user, "產品", "出貨",
+                                            product_name, qty, w_ship, round(w_ship * qty, 2),
+                                            f"訂單出貨｜{sel_ship_ono}", ship_user)
+                                        wage_count += 1
+                            st.success(f"✅ {msg}")
+                            if wage_count > 0:
+                                st.info(f"💰 已自動建立 {wage_count} 筆出貨工資紀錄（出貨人員：{ship_user}）")
+
+                            # 3. 如果已完成，補建還沒建過的製造/包裝工資
+                            if target_st == "已完成":
+                                w_extra = auto_create_wage_entries_for_order(
+                                    sel_ship_ono, sel_ship_row.get('order_date', date.today()), ship_user)
+                                if w_extra > 0:
+                                    st.info(f"💰 另補建 {w_extra} 筆製造/包裝工資紀錄")
+                            time.sleep(1)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+
+        st.markdown("---")
+        render_history_table("銷售出貨")
+
+    # ── 散客出貨（原有功能）──────────────────────────────────────
+    with tab_manual_ship:
+        st.markdown("##### 非訂單出貨（手動選品）")
+        col_a, col_b, col_c = st.columns(3)
+        ship_opt = col_a.selectbox("寄送方式", SHIPPING_METHODS + ["手動輸入..."], key="ms_method")
+        final_ship = col_a.text_input("自訂方式", key="ms_custom") if ship_opt == "手動輸入..." else ship_opt
+        ship_no = col_b.text_input("配送號碼", key="ms_tracking")
+        user = col_c.selectbox("經手人", KEYERS, index=3, key="ms_user")
+        order_id = st.text_input("備註", key="ms_note")
+        st.divider()
+        prods = get_formatted_product_df()
+        if not prods.empty:
+            col1, col2, col3 = st.columns([3, 1, 1])
+            sel_p = col1.selectbox("挑選商品", prods['label'], key="ms_prod")
+            wh = col2.selectbox("倉庫", WAREHOUSES, index=3, key="ms_wh")
+            qty = col3.number_input("數量", 1.0, key="ms_qty")
+            if st.button("加入待出貨清單", key="ms_add"):
+                st.session_state['out_list'].append({'sku': sel_p.split(" | ")[0], 'name': sel_p.split(" | ")[1], 'wh': wh, 'qty': qty})
+                st.rerun()
+        if st.session_state['out_list']:
+            for i, item in enumerate(st.session_state['out_list']):
+                c_l, c_d = st.columns([5, 1])
+                c_l.write(f"**{item['name']}** - {item['wh']} x{item['qty']}")
+                if c_d.button("移除", key=f"rm_o_{i}"): st.session_state['out_list'].pop(i); st.rerun()
+            if st.button("確認出貨", type="primary", use_container_width=True, key="ms_confirm"):
+                for x in st.session_state['out_list']:
+                    add_transaction("銷售出貨", date.today(), x['sku'], x['wh'], x['qty'], user, order_id, final_ship, ship_no)
+                st.session_state['out_list'] = []; st.success("出貨完成"); time.sleep(1); st.rerun()
+        render_history_table("銷售出貨")
 
 # --- 🛒 訂單管理 ---
 elif page == "🛒 訂單管理":
