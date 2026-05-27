@@ -262,37 +262,39 @@ def get_gs_client():
 
 @st.cache_data(ttl=120, show_spinner=False)
 def _load_sheet_cached(tab, columns_tuple):
-    """帶快取的 Google Sheets 讀取（120 秒內不重複呼叫 API）"""
+    """帶快取的 Google Sheets 讀取（120 秒內不重複呼叫 API）
+    注意：失敗時拋出例外（不會被快取），只快取成功結果。"""
     columns = list(columns_tuple)
+    wb = get_gs_client().open_by_key(SHEET_ID)
     try:
-        wb = get_gs_client().open_by_key(SHEET_ID)
-        try:
-            ws = wb.worksheet(tab)
-        except gspread.exceptions.WorksheetNotFound:
-            ws = wb.add_worksheet(title=tab, rows="1000", cols="20")
-            ws.update(range_name='A1', values=[columns])
-            return pd.DataFrame(columns=columns)
-        values = ws.get_all_values()
-        if not values or len(values) < 2:
-            return pd.DataFrame(columns=columns)
-        headers = [str(h).strip().replace("﻿", "") for h in values[0]]
-        final_h = []
-        for i, h in enumerate(headers):
-            if not h:          final_h.append(f"未命名_{i}")
-            elif h in final_h: final_h.append(f"{h}_{i}")
-            else:              final_h.append(h)
-        df = pd.DataFrame(values[1:], columns=final_h)
-        df = df[df.astype(str).apply(lambda x: x.str.strip() != "").any(axis=1)]
-        for col in columns:
-            if col not in df.columns:
-                df[col] = ""
-        return df[columns].copy()
+        ws = wb.worksheet(tab)
+    except gspread.exceptions.WorksheetNotFound:
+        ws = wb.add_worksheet(title=tab, rows="1000", cols="20")
+        ws.update(range_name='A1', values=[columns])
+        return pd.DataFrame(columns=columns)
+    values = ws.get_all_values()
+    if not values or len(values) < 2:
+        return pd.DataFrame(columns=columns)
+    headers = [str(h).strip().replace("﻿", "") for h in values[0]]
+    final_h = []
+    for i, h in enumerate(headers):
+        if not h:          final_h.append(f"未命名_{i}")
+        elif h in final_h: final_h.append(f"{h}_{i}")
+        else:              final_h.append(h)
+    df = pd.DataFrame(values[1:], columns=final_h)
+    df = df[df.astype(str).apply(lambda x: x.str.strip() != "").any(axis=1)]
+    for col in columns:
+        if col not in df.columns:
+            df[col] = ""
+    return df[columns].copy()
+
+def _load_sheet(tab, columns):
+    """讀取工作表，失敗時顯示錯誤並回傳空 DataFrame（不快取失敗結果）"""
+    try:
+        return _load_sheet_cached(tab, tuple(columns))
     except Exception as e:
         st.error(f"讀取 {tab} 失敗: {e}")
         return pd.DataFrame(columns=columns)
-
-def _load_sheet(tab, columns):
-    return _load_sheet_cached(tab, tuple(columns))
 
 def _save_sheet(tab, df):
     try:
