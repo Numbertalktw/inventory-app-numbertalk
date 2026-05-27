@@ -1124,9 +1124,14 @@ def save_wage_product(product_name, wage_make=0, wage_pack=0, wage_ship=0, wage_
                 return col_idx[alias]
         return None
 
-    # 若缺少員工欄位（新舊名稱都沒有），自動補上
-    for new_name, old_name in [("empMake", "emp_make"), ("empPack", "emp_pack"), ("empShip", "emp_ship")]:
-        if new_name not in header and old_name not in header:
+    # 若缺少員工欄位（新舊名稱都沒有），自動補上（先擴展欄數避免超出 grid limits）
+    missing_emp = [n for n, o in [("empMake", "emp_make"), ("empPack", "emp_pack"), ("empShip", "emp_ship")]
+                   if n not in header and o not in header]
+    if missing_emp:
+        needed = len(header) + len(missing_emp)
+        if ws.col_count < needed:
+            ws.resize(cols=needed + 3)
+        for new_name in missing_emp:
             header.append(new_name)
             ws.update_cell(1, len(header), new_name)
             col_idx[new_name] = len(header)
@@ -1358,7 +1363,7 @@ elif page == "🚚 出貨作業":
 
     # ── 訂單出貨（新功能）──────────────────────────────────────
     with tab_order_ship:
-        st.markdown("##### 選擇訂單 → 出貨扣庫存 → 自動建立出貨工資")
+        st.markdown("##### 選擇訂單 → 對應工資產品 → 出貨扣庫存 → 自動建立工資")
         df_orders_ship = load_orders()
         if df_orders_ship.empty:
             st.info("目前沒有任何訂單")
@@ -1385,14 +1390,42 @@ elif page == "🚚 出貨作業":
                 si3.write(f"**總額:** ${sel_ship_row.get('total_amount', 0):,.0f}")
 
                 items_ship = load_order_items(sel_ship_ono)
-                if not items_ship.empty:
-                    st.markdown("##### 出貨品項")
-                    st.dataframe(
-                        items_ship[['product_name', 'qty', 'warehouse']].rename(
-                            columns={'product_name': '品名', 'qty': '數量', 'warehouse': '倉庫'}),
-                        use_container_width=True, hide_index=True
-                    )
+                df_cat_ship = load_wage_catalog()
+                cat_names_s = df_cat_ship['name'].tolist() if not df_cat_ship.empty else []
+                cat_options_s = ["（不計工資）"] + cat_names_s
 
+                if not items_ship.empty:
+                    st.markdown("##### 出貨品項 → 對應工資產品")
+                    st.caption("請為每個品項選擇對應的工資產品")
+                    matched_ship = []
+                    for idx, (_, item) in enumerate(items_ship.iterrows()):
+                        product_name = str(item.get('product_name', ''))
+                        qty = float(item.get('qty', 1) or 1)
+                        wh = str(item.get('warehouse', ''))
+                        default_idx = 0
+                        for ci, cn in enumerate(cat_names_s):
+                            if product_name == cn:
+                                default_idx = ci + 1; break
+                            if product_name in cn or cn in product_name:
+                                default_idx = ci + 1; break
+                            if len(product_name) >= 4 and product_name[:4] in cn:
+                                default_idx = ci + 1; break
+
+                        sc1, sc2 = st.columns([2, 3])
+                        sc1.write(f"**{product_name}** ×{qty:.0f}（{wh}）")
+                        sel_cat_s = sc2.selectbox(
+                            "對應工資產品", cat_options_s, index=default_idx,
+                            key=f"ship_cat_{idx}_{sel_ship_ono}", label_visibility="collapsed")
+
+                        if sel_cat_s != "（不計工資）":
+                            cat_row = df_cat_ship[df_cat_ship['name'] == sel_cat_s].iloc[0]
+                            w_ship_val = float(cat_row.get('wageShip', 0) or 0)
+                            matched_ship.append({
+                                'product_name': product_name, 'cat_name': sel_cat_s,
+                                'qty': qty, 'w_ship': w_ship_val
+                            })
+
+                st.markdown("---")
                 ship_c1, ship_c2, ship_c3 = st.columns(3)
                 ship_method = ship_c1.selectbox("寄送方式", SHIPPING_METHODS, key="ship_o_method")
                 ship_tracking = ship_c2.text_input("配送號碼", key="ship_o_tracking")
@@ -1404,7 +1437,12 @@ elif page == "🚚 出貨作業":
                     target_st = "已完成"
                 else:
                     target_st = "未付款/已出貨"
-                st.info(f"出貨後訂單狀態將更新為：**{target_st}**")
+
+                if matched_ship:
+                    total_ship_wage = sum(x['w_ship'] * x['qty'] for x in matched_ship)
+                    st.info(f"💰 出貨工資合計: **${total_ship_wage:,.0f}**（{ship_user}）　｜　出貨後狀態：**{target_st}**")
+                else:
+                    st.info(f"出貨後訂單狀態將更新為：**{target_st}**（無工資產品對應）")
 
                 if st.button("🚚 確認出貨", type="primary", use_container_width=True, key="ship_o_confirm"):
                     if items_ship.empty:
@@ -1413,27 +1451,19 @@ elif page == "🚚 出貨作業":
                         # 1. 執行出貨（扣庫存 + 更新訂單狀態）
                         ok, msg = ship_order(sel_ship_ono, ship_user, ship_method, ship_tracking, target_st)
                         if ok:
-                            # 2. 自動建立出貨工資
-                            df_cat_ship = load_wage_catalog()
+                            # 2. 建立出貨工資
                             wage_count = 0
-                            for _, item in items_ship.iterrows():
-                                product_name = str(item.get('product_name', ''))
-                                qty = float(item.get('qty', 1) or 1)
-                                cat_match = df_cat_ship[df_cat_ship['name'] == product_name] if not df_cat_ship.empty else pd.DataFrame()
-                                if cat_match.empty and not df_cat_ship.empty:
-                                    cat_match = df_cat_ship[df_cat_ship['name'].str.contains(product_name[:8], na=False, regex=False)]
-                                if not cat_match.empty:
-                                    cat_row = cat_match.iloc[0]
-                                    w_ship = float(cat_row.get('wageShip', 0) or 0)
-                                    if w_ship > 0:
-                                        add_wage_entry(
-                                            date.today().isoformat(), ship_user, "產品", "出貨",
-                                            product_name, qty, w_ship, round(w_ship * qty, 2),
-                                            f"訂單出貨｜{sel_ship_ono}", ship_user)
-                                        wage_count += 1
+                            for mi in matched_ship:
+                                if mi['w_ship'] > 0:
+                                    add_wage_entry(
+                                        date.today().isoformat(), ship_user, "產品", "出貨",
+                                        mi['cat_name'], mi['qty'], mi['w_ship'],
+                                        round(mi['w_ship'] * mi['qty'], 2),
+                                        f"訂單出貨｜{sel_ship_ono}", ship_user)
+                                    wage_count += 1
                             st.success(f"✅ {msg}")
                             if wage_count > 0:
-                                st.info(f"💰 已自動建立 {wage_count} 筆出貨工資紀錄（出貨人員：{ship_user}）")
+                                st.info(f"💰 已建立 {wage_count} 筆出貨工資紀錄（出貨人員：{ship_user}）")
 
                             # 3. 如果已完成，補建還沒建過的製造/包裝工資
                             if target_st == "已完成":
@@ -2072,7 +2102,7 @@ elif page == "🔨 製造作業":
 
     # ── 訂單製造（新功能）──────────────────────────────────────
     with t_order_mfg:
-        st.markdown("##### 選擇訂單 → 指定製造 / 包裝人員 → 自動建立工資")
+        st.markdown("##### 選擇訂單 → 對應工資產品 → 指定人員 → 建立工資")
         df_orders_mfg = load_orders()
         if df_orders_mfg.empty:
             st.info("目前沒有任何訂單")
@@ -2090,54 +2120,79 @@ elif page == "🔨 製造作業":
                 sel_mfg_ono = sel_mfg_order.split(" | ")[0]
 
                 items_mfg = load_order_items(sel_mfg_ono)
-                if not items_mfg.empty:
-                    st.markdown("##### 訂單品項")
-                    st.dataframe(
-                        items_mfg[['product_name', 'qty', 'warehouse']].rename(
-                            columns={'product_name': '品名', 'qty': '數量', 'warehouse': '倉庫'}),
-                        use_container_width=True, hide_index=True
-                    )
+                df_cat_mfg = load_wage_catalog()
+                cat_names = df_cat_mfg['name'].tolist() if not df_cat_mfg.empty else []
+                cat_options = ["（不計工資）"] + cat_names
 
-                mc1, mc2 = st.columns(2)
-                mfg_maker = mc1.selectbox("👷 製造人員", KEYERS, key="mfg_maker")
-                mfg_packer = mc2.selectbox("📦 包裝人員", KEYERS, key="mfg_packer")
+                if items_mfg.empty:
+                    st.info("此訂單沒有品項")
+                elif not cat_names:
+                    st.warning("⚠️ 工資產品目錄為空，請先到「工資管理 → 產品目錄」設定")
+                else:
+                    st.markdown("##### 訂單品項 → 對應工資產品")
+                    st.caption("請為每個品項選擇對應的工資產品（系統會自動嘗試比對）")
+                    matched_items = []
+                    for idx, (_, item) in enumerate(items_mfg.iterrows()):
+                        product_name = str(item.get('product_name', ''))
+                        qty = float(item.get('qty', 1) or 1)
+                        # 自動比對：精確 → 包含 → 前6字
+                        default_idx = 0
+                        for ci, cn in enumerate(cat_names):
+                            if product_name == cn:
+                                default_idx = ci + 1; break
+                            if product_name in cn or cn in product_name:
+                                default_idx = ci + 1; break
+                            if len(product_name) >= 4 and product_name[:4] in cn:
+                                default_idx = ci + 1; break
 
-                if st.button("✅ 確認完成製造與包裝", type="primary", use_container_width=True):
-                    if items_mfg.empty:
-                        st.error("此訂單沒有品項")
+                        mc1, mc2 = st.columns([2, 3])
+                        mc1.write(f"**{product_name}** ×{qty:.0f}")
+                        sel_cat = mc2.selectbox(
+                            "對應工資產品", cat_options, index=default_idx,
+                            key=f"mfg_cat_{idx}_{sel_mfg_ono}", label_visibility="collapsed")
+
+                        if sel_cat != "（不計工資）":
+                            cat_row = df_cat_mfg[df_cat_mfg['name'] == sel_cat].iloc[0]
+                            w_make = float(cat_row.get('wageMake', 0) or 0)
+                            w_pack = float(cat_row.get('wagePack', 0) or 0)
+                            matched_items.append({
+                                'product_name': product_name, 'cat_name': sel_cat,
+                                'qty': qty, 'w_make': w_make, 'w_pack': w_pack
+                            })
+
+                    st.markdown("---")
+                    mc_p1, mc_p2 = st.columns(2)
+                    mfg_maker = mc_p1.selectbox("👷 製造人員", KEYERS, key="mfg_maker")
+                    mfg_packer = mc_p2.selectbox("📦 包裝人員", KEYERS, key="mfg_packer")
+
+                    if matched_items:
+                        total_make = sum(x['w_make'] * x['qty'] for x in matched_items)
+                        total_pack = sum(x['w_pack'] * x['qty'] for x in matched_items)
+                        st.info(f"💰 製造工資合計: **${total_make:,.0f}**（{mfg_maker}）　包裝工資合計: **${total_pack:,.0f}**（{mfg_packer}）")
                     else:
-                        df_cat_mfg = load_wage_catalog()
+                        st.warning("⚠️ 沒有任何品項對應到工資產品")
+
+                    if st.button("✅ 確認完成製造與包裝", type="primary", use_container_width=True):
                         wage_count = 0
-                        for _, item in items_mfg.iterrows():
-                            product_name = str(item.get('product_name', ''))
-                            qty = float(item.get('qty', 1) or 1)
-                            cat_match = df_cat_mfg[df_cat_mfg['name'] == product_name] if not df_cat_mfg.empty else pd.DataFrame()
-                            if cat_match.empty and not df_cat_mfg.empty:
-                                cat_match = df_cat_mfg[df_cat_mfg['name'].str.contains(product_name[:8], na=False, regex=False)]
-                            if not cat_match.empty:
-                                cat_row = cat_match.iloc[0]
-                                # 製造工資
-                                w_make = float(cat_row.get('wageMake', 0) or 0)
-                                if w_make > 0:
-                                    add_wage_entry(
-                                        date.today().isoformat(), mfg_maker, "產品", "製造",
-                                        product_name, qty, w_make, round(w_make * qty, 2),
-                                        f"訂單製造｜{sel_mfg_ono}", mfg_maker)
-                                    wage_count += 1
-                                # 包裝工資
-                                w_pack = float(cat_row.get('wagePack', 0) or 0)
-                                if w_pack > 0:
-                                    add_wage_entry(
-                                        date.today().isoformat(), mfg_packer, "產品", "包裝",
-                                        product_name, qty, w_pack, round(w_pack * qty, 2),
-                                        f"訂單包裝｜{sel_mfg_ono}", mfg_packer)
-                                    wage_count += 1
-                            else:
-                                st.warning(f"⚠️ 產品「{product_name}」不在工資目錄中，跳過")
+                        for mi in matched_items:
+                            if mi['w_make'] > 0:
+                                add_wage_entry(
+                                    date.today().isoformat(), mfg_maker, "產品", "製造",
+                                    mi['cat_name'], mi['qty'], mi['w_make'],
+                                    round(mi['w_make'] * mi['qty'], 2),
+                                    f"訂單製造｜{sel_mfg_ono}", mfg_maker)
+                                wage_count += 1
+                            if mi['w_pack'] > 0:
+                                add_wage_entry(
+                                    date.today().isoformat(), mfg_packer, "產品", "包裝",
+                                    mi['cat_name'], mi['qty'], mi['w_pack'],
+                                    round(mi['w_pack'] * mi['qty'], 2),
+                                    f"訂單包裝｜{sel_mfg_ono}", mfg_packer)
+                                wage_count += 1
                         if wage_count > 0:
-                            st.success(f"✅ 已為訂單 {sel_mfg_ono} 建立 {wage_count} 筆工資紀錄（製造：{mfg_maker}，包裝：{mfg_packer}）")
+                            st.success(f"✅ 已建立 {wage_count} 筆工資紀錄（製造：{mfg_maker}，包裝：{mfg_packer}）")
                         else:
-                            st.warning("⚠️ 未建立任何工資紀錄，請確認「工資管理 → 產品目錄」已設定工資金額")
+                            st.warning("⚠️ 未建立任何工資紀錄（所有品項的工資金額為 0）")
                         time.sleep(1)
                         st.rerun()
 
