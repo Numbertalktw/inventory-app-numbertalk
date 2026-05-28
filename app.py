@@ -2242,11 +2242,181 @@ elif page == "🔨 製造作業":
 
 # --- 📊 報表查詢 ---
 elif page == "📊 報表查詢":
-    st.subheader("📊 庫存報表")
-    df = get_stock_overview()
-    if not df.empty:
-        st.dataframe(df, use_container_width=True)
-        st.download_button("下載 CSV", df.to_csv(index=False).encode('utf-8-sig'), f"Stock_{date.today()}.csv", "text/csv")
+    st.subheader("📊 報表查詢")
+    tab_stock, tab_profit = st.tabs(["📦 庫存報表", "📈 收益損益表"])
+
+    with tab_stock:
+        df = get_stock_overview()
+        if not df.empty:
+            st.dataframe(df, use_container_width=True)
+            st.download_button("下載 CSV", df.to_csv(index=False).encode('utf-8-sig'), f"Stock_{date.today()}.csv", "text/csv")
+
+    with tab_profit:
+        st.markdown("##### 選擇月份")
+        profit_ym = st.text_input("年月（YYYY-MM）", value=date.today().strftime("%Y-%m"), max_chars=7, key="profit_ym")
+
+        # ── 1. 訂單收入（已完成訂單）──
+        df_orders_rpt = load_orders()
+        completed = pd.DataFrame()
+        if not df_orders_rpt.empty:
+            completed = df_orders_rpt[
+                (df_orders_rpt['status'] == "已完成") &
+                (df_orders_rpt['order_date'].astype(str).str.startswith(profit_ym))
+            ]
+        order_count = len(completed)
+        order_items_total = float(completed['items_total'].sum()) if not completed.empty else 0.0
+        shipping_income = float(completed['shipping_fee'].sum()) if not completed.empty else 0.0
+        discount_total = float(completed['discount'].sum()) if not completed.empty else 0.0
+        total_revenue = order_items_total + shipping_income - discount_total
+
+        # ── 2. 工資支出 ──
+        df_wages_rpt = load_wage_entries(profit_ym)
+        wage_total = float(df_wages_rpt['amount'].sum()) if not df_wages_rpt.empty else 0.0
+
+        # ── 3. 進貨成本 ──
+        df_hist = load_data("History")
+        purchase_cost = 0.0
+        df_purchase_month = pd.DataFrame()
+        if not df_hist.empty and 'doc_type' in df_hist.columns:
+            date_col = 'date' if 'date' in df_hist.columns else df_hist.columns[2] if len(df_hist.columns) > 2 else None
+            if date_col:
+                df_purchase_month = df_hist[
+                    (df_hist['doc_type'].astype(str) == '進貨') &
+                    (df_hist[date_col].astype(str).str.startswith(profit_ym))
+                ]
+                if not df_purchase_month.empty and 'cost' in df_purchase_month.columns:
+                    purchase_cost = float(pd.to_numeric(df_purchase_month['cost'], errors='coerce').fillna(0).sum())
+
+        # ── 4. 計算 ──
+        gross_profit = total_revenue - purchase_cost
+        net_profit = gross_profit - wage_total
+        margin_pct = (net_profit / total_revenue * 100) if total_revenue > 0 else 0
+
+        # ═══════════════════════════════════════════════════════════
+        # 顯示
+        # ═══════════════════════════════════════════════════════════
+        st.markdown(f"### 📈 {profit_ym} 損益表")
+
+        # 四大指標
+        km1, km2, km3, km4 = st.columns(4)
+        km1.metric("💰 總收入", f"${total_revenue:,.0f}", f"{order_count} 筆訂單")
+        km2.metric("📦 進貨成本", f"${purchase_cost:,.0f}")
+        km3.metric("👷 工資支出", f"${wage_total:,.0f}")
+        km4.metric("📈 淨利", f"${net_profit:,.0f}",
+                    delta=f"淨利率 {margin_pct:.1f}%" if total_revenue > 0 else "無收入")
+
+        st.markdown("---")
+
+        # 損益明細表
+        st.markdown("##### 📋 損益明細")
+        pnl_rows = []
+        pnl_rows.append({"項目": "🟢 商品收入", "金額": f"${order_items_total:,.0f}"})
+        pnl_rows.append({"項目": "🟢 運費收入", "金額": f"${shipping_income:,.0f}"})
+        if discount_total > 0:
+            pnl_rows.append({"項目": "🔴 折扣", "金額": f"-${discount_total:,.0f}"})
+        pnl_rows.append({"項目": "──── 總收入 ────", "金額": f"**${total_revenue:,.0f}**"})
+        pnl_rows.append({"項目": "🔴 進貨成本", "金額": f"-${purchase_cost:,.0f}"})
+        pnl_rows.append({"項目": "──── 毛利 ────", "金額": f"**${gross_profit:,.0f}**"})
+        pnl_rows.append({"項目": "🔴 工資支出", "金額": f"-${wage_total:,.0f}"})
+        pnl_rows.append({"項目": "══ 淨利 ══", "金額": f"**${net_profit:,.0f}**"})
+
+        pnl_md = "| 項目 | 金額 |\n|------|------:|\n"
+        for r in pnl_rows:
+            pnl_md += f"| {r['項目']} | {r['金額']} |\n"
+        st.markdown(pnl_md)
+
+        # ── 詳細分類 ──
+        st.markdown("---")
+        bd1, bd2, bd3 = st.tabs(["📦 訂單明細", "👷 工資明細", "📥 進貨明細"])
+
+        with bd1:
+            if completed.empty:
+                st.info(f"{profit_ym} 沒有已完成的訂單")
+            else:
+                st.markdown(f"共 **{order_count}** 筆已完成訂單")
+                disp_cols = ['order_no', 'order_date', 'customer_name', 'items_total',
+                             'discount', 'shipping_fee', 'total_amount']
+                disp_cols = [c for c in disp_cols if c in completed.columns]
+                disp_rename = {'order_no': '訂單號', 'order_date': '日期',
+                               'customer_name': '客戶', 'items_total': '商品小計',
+                               'discount': '折扣', 'shipping_fee': '運費',
+                               'total_amount': '應收總額'}
+                st.dataframe(completed[disp_cols].rename(columns=disp_rename),
+                             use_container_width=True, hide_index=True)
+
+                # 商品銷售排行
+                st.markdown("##### 🏆 商品銷售排行")
+                all_items_month = pd.DataFrame()
+                for _, orow in completed.iterrows():
+                    oi = load_order_items(str(orow['order_no']))
+                    if not oi.empty:
+                        all_items_month = pd.concat([all_items_month, oi], ignore_index=True)
+                if not all_items_month.empty:
+                    prod_rank = all_items_month.groupby('product_name').agg(
+                        數量=('qty', 'sum'), 營收=('subtotal', 'sum')
+                    ).reset_index().rename(columns={'product_name': '品名'})
+                    prod_rank = prod_rank.sort_values('營收', ascending=False)
+                    st.dataframe(prod_rank, use_container_width=True, hide_index=True)
+
+        with bd2:
+            if df_wages_rpt.empty:
+                st.info(f"{profit_ym} 沒有工資紀錄")
+            else:
+                # 按員工匯總
+                st.markdown("##### 👷 按員工")
+                emp_sum = df_wages_rpt.groupby('employee_name')['amount'].sum().reset_index()
+                emp_sum.columns = ['員工', '金額']
+                emp_sum = emp_sum.sort_values('金額', ascending=False)
+                for _, er in emp_sum.iterrows():
+                    pct = er['金額'] / wage_total * 100 if wage_total > 0 else 0
+                    st.write(f"**{er['員工']}**　NT$ {er['金額']:,.0f}　({pct:.1f}%)")
+
+                # 按階段匯總
+                if 'stage' in df_wages_rpt.columns:
+                    st.markdown("##### 📊 按工作階段")
+                    stage_sum = df_wages_rpt.groupby('stage')['amount'].sum().reset_index()
+                    stage_sum.columns = ['階段', '金額']
+                    stage_sum = stage_sum.sort_values('金額', ascending=False)
+                    st.dataframe(stage_sum, use_container_width=True, hide_index=True)
+
+                # 完整紀錄
+                st.markdown("##### 📝 完整紀錄")
+                w_cols = ['date', 'employee_name', 'stage', 'item', 'qty', 'price', 'amount', 'note']
+                w_cols = [c for c in w_cols if c in df_wages_rpt.columns]
+                w_rename = {'date': '日期', 'employee_name': '員工', 'stage': '階段',
+                            'item': '項目', 'qty': '數量', 'price': '單價',
+                            'amount': '金額', 'note': '備註'}
+                st.dataframe(df_wages_rpt[w_cols].rename(columns=w_rename),
+                             use_container_width=True, hide_index=True)
+
+        with bd3:
+            if df_purchase_month.empty:
+                st.info(f"{profit_ym} 沒有進貨紀錄")
+            else:
+                st.markdown(f"共 **{len(df_purchase_month)}** 筆進貨")
+                p_cols = ['date', 'product_name', 'sku', 'qty', 'cost', 'warehouse', 'user']
+                p_cols = [c for c in p_cols if c in df_purchase_month.columns]
+                p_rename = {'date': '日期', 'product_name': '品名', 'sku': '貨號',
+                            'qty': '數量', 'cost': '成本', 'warehouse': '倉庫',
+                            'user': '經手人'}
+                st.dataframe(df_purchase_month[p_cols].rename(columns=p_rename),
+                             use_container_width=True, hide_index=True)
+
+        # 匯出 CSV
+        st.markdown("---")
+        export_data = pd.DataFrame([
+            {"項目": "商品收入", "金額": order_items_total},
+            {"項目": "運費收入", "金額": shipping_income},
+            {"項目": "折扣", "金額": -discount_total},
+            {"項目": "總收入", "金額": total_revenue},
+            {"項目": "進貨成本", "金額": -purchase_cost},
+            {"項目": "毛利", "金額": gross_profit},
+            {"項目": "工資支出", "金額": -wage_total},
+            {"項目": "淨利", "金額": net_profit},
+        ])
+        st.download_button("⬇️ 匯出損益表 CSV",
+                           export_data.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig'),
+                           f"損益表_{profit_ym}.csv", "text/csv")
 
 # --- 💰 工資管理 ---
 elif page == "💰 工資管理":
