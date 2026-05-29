@@ -427,7 +427,7 @@ def ensure_order_sheets():
             ws.append_row(["order_no", "order_date", "customer_name", "customer_phone",
                            "customer_email", "shipping_address", "status", "total_amount",
                            "note", "created_by", "created_at", "discount", "shipping_fee",
-                           "items_total", "birthday", "lunar_birthday", "birth_time"])
+                           "items_total", "birthday", "lunar_birthday", "birth_time", "items_detail"])
         if "OrderItems" not in existing:
             ws = sh.add_worksheet(title="OrderItems", rows=5000, cols=8)
             ws.append_row(["order_no", "sku", "product_name", "qty", "unit_price",
@@ -446,7 +446,10 @@ def ensure_extra_columns():
             if not ws_w:
                 continue
             cur_header = ws_w.row_values(1)
-            missing = [c for c in ["birthday", "lunar_birthday", "birth_time"] if c not in cur_header]
+            extra = ["birthday", "lunar_birthday", "birth_time"]
+            if sheet_name == "Orders":
+                extra.append("items_detail")
+            missing = [c for c in extra if c not in cur_header]
             if missing:
                 # 先擴展欄數，避免超出 grid limits
                 needed_total = len(cur_header) + len(missing)
@@ -487,7 +490,8 @@ def create_order(order_no, order_date, customer_name, customer_phone,
             'discount': float(discount), 'shipping_fee': float(shipping_fee),
             'items_total': float(items_total),
             'birthday': str(birthday), 'lunar_birthday': str(lunar_birthday),
-            'birth_time': str(birth_time)
+            'birth_time': str(birth_time),
+            'items_detail': ", ".join([f"{it['product_name']} x{int(it['qty'])}" for it in items])
         }
         for k, v in field_vals.items():
             if k in col_map:
@@ -660,15 +664,19 @@ def delete_order_item(order_no, sku, warehouse):
         return False
 
 def recalc_order_total(order_no, discount=0, shipping_fee=0):
-    """重新計算訂單總額並更新"""
+    """重新計算訂單總額並更新（含品項明細摘要）"""
     items = load_order_items(order_no)
     items_total = float(items['subtotal'].sum()) if not items.empty else 0.0
     total = items_total - float(discount) + float(shipping_fee)
+    items_summary = ", ".join(
+        [f"{row['product_name']} x{int(row['qty'])}" for _, row in items.iterrows()]
+    ) if not items.empty else ""
     return update_order_fields(order_no, {
         'items_total': float(items_total),
         'total_amount': float(total),
         'discount': float(discount),
-        'shipping_fee': float(shipping_fee)
+        'shipping_fee': float(shipping_fee),
+        'items_detail': items_summary
     })
 
 def ship_order(order_no, keyer, ship_method="", ship_no="", target_status="未付款/已出貨"):
