@@ -2264,10 +2264,14 @@ elif page == "📊 報表查詢":
                 (df_orders_rpt['order_date'].astype(str).str.startswith(profit_ym))
             ]
         order_count = len(completed)
-        order_items_total = float(completed['items_total'].sum()) if not completed.empty else 0.0
+        # 以 total_amount 為主要收入（相容早期訂單沒有 items_total 的情況）
+        total_revenue = float(completed['total_amount'].sum()) if not completed.empty else 0.0
         shipping_income = float(completed['shipping_fee'].sum()) if not completed.empty else 0.0
         discount_total = float(completed['discount'].sum()) if not completed.empty else 0.0
-        total_revenue = order_items_total + shipping_income - discount_total
+        order_items_total = float(completed['items_total'].sum()) if not completed.empty else 0.0
+        # 若 items_total 為空但 total_amount 有值，反推商品收入
+        if order_items_total == 0 and total_revenue > 0:
+            order_items_total = total_revenue + discount_total - shipping_income
 
         # ── 2. 工資支出 ──
         df_wages_rpt = load_wage_entries(profit_ym)
