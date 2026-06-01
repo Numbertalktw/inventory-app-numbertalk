@@ -691,6 +691,30 @@ def recalc_order_total(order_no, discount=0, shipping_fee=0):
         'items_detail': items_summary
     })
 
+def backfill_items_detail():
+    """回填所有訂單的 items_detail 欄位"""
+    df_orders = load_orders()
+    if df_orders.empty:
+        return 0
+    count = 0
+    import time as _bt
+    for _, order in df_orders.iterrows():
+        detail = str(order.get('items_detail', '')).strip()
+        if detail and detail not in ('', 'nan', 'None'):
+            continue
+        ono = str(order.get('order_no', ''))
+        items = load_order_items(ono)
+        if items.empty:
+            continue
+        summary = ", ".join(
+            [f"{row['product_name']} x{int(row['qty'])}" for _, row in items.iterrows()]
+        )
+        if summary:
+            update_order_fields(ono, {'items_detail': summary})
+            count += 1
+            _bt.sleep(1)
+    return count
+
 def ship_order(order_no, keyer, ship_method="", ship_no="", target_status="未付款/已出貨"):
     items = load_order_items(order_no)
     if items.empty:
@@ -1785,6 +1809,15 @@ elif page == "🛒 訂單管理":
                         st.error(msg)
 
     with tab_list:
+        if st.button("🔄 回填訂單內容到 Google Sheets", key="backfill_detail", help="將所有缺少 items_detail 的訂單補上商品明細"):
+            with st.spinner("回填中..."):
+                bf_count = backfill_items_detail()
+            if bf_count > 0:
+                st.success(f"✅ 已為 {bf_count} 筆訂單回填商品明細")
+                time.sleep(1.5)
+                st.rerun()
+            else:
+                st.info("所有訂單的商品明細已齊全")
         df_orders = load_orders()
         if df_orders.empty:
             st.info("目前沒有任何訂單")
