@@ -1099,7 +1099,18 @@ def add_wage_entry(date_str, employee_name, category, stage, item, qty, price, a
     entry_id = str(uuid.uuid4())[:8]
     created_at = dt.datetime.now().isoformat()
     ws = get_worksheet_for_write("WageEntries")
-    ws.append_row([entry_id, date_str, employee_name, category, stage or "", item, qty or "", price or "", amount, note, created_by, created_at, ""])
+    if not ws:
+        return False
+    import time as _t
+    for _retry in range(3):
+        try:
+            ws.append_row([entry_id, date_str, employee_name, category, stage or "", item, qty or "", price or "", amount, note, created_by, created_at, ""])
+            break
+        except Exception as _e:
+            if '429' in str(_e) and _retry < 2:
+                _t.sleep(3 + _retry * 3)
+                continue
+            raise
     clear_cache()
     return True
 
@@ -1391,8 +1402,10 @@ def backfill_wage_entries_for_month(year_month):
                         if w > 0 and (not e or e.lower() == 'nan'):
                             warnings.append(f"ℹ️ {ono}: 「{pname}」{stg} 負責人未設定，將使用訂單建立者代替")
 
+        import time as _bt
         n = auto_create_wage_entries_for_order(ono, odate, created_by)
         if n > 0:
+            _bt.sleep(2)  # 避免 API 限流
             total_created += n
             order_count += 1
     return order_count, total_created, warnings
