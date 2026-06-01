@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import time
 
 # ==========================================
@@ -971,16 +971,16 @@ def ensure_wage_sheets():
     # WageCatalog（含每階段負責員工欄位）
     if "WageCatalog" not in existing_titles:
         ws_cat = sh.add_worksheet(title="WageCatalog", rows=200, cols=9)
-        ws_cat.append_row(["name", "wageMake", "wagePack", "wageShip", "wageSvc", "empMake", "empPack", "empShip"])
+        ws_cat.append_row(["name", "wageMake", "wagePack", "wageShip", "wageSvc", "empMake", "empPack", "empShip", "empSvc"])
         for p in DEFAULT_WAGE_CATALOG:
-            ws_cat.append_row([p["name"], p["wageMake"], p["wagePack"], p["wageShip"], p["wageSvc"], "", "", ""])
+            ws_cat.append_row([p["name"], p["wageMake"], p["wagePack"], p["wageShip"], p["wageSvc"], "", "", "", ""])
     else:
         ws_cat = sh.worksheet("WageCatalog")
         header = ws_cat.row_values(1)
         if not header:
-            ws_cat.append_row(["name", "wageMake", "wagePack", "wageShip", "wageSvc", "empMake", "empPack", "empShip"])
+            ws_cat.append_row(["name", "wageMake", "wagePack", "wageShip", "wageSvc", "empMake", "empPack", "empShip", "empSvc"])
             for p in DEFAULT_WAGE_CATALOG:
-                ws_cat.append_row([p["name"], p["wageMake"], p["wagePack"], p["wageShip"], p["wageSvc"], "", "", ""])
+                ws_cat.append_row([p["name"], p["wageMake"], p["wagePack"], p["wageShip"], p["wageSvc"], "", "", "", ""])
         # 若既有工作表缺少員工欄位，save_wage_product 儲存時會自動補上
 
     # WageEntries
@@ -1040,7 +1040,7 @@ def load_wage_catalog():
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
         else:
             df[col] = 0
-    for col in ["empMake", "empPack", "empShip"]:
+    for col in ["empMake", "empPack", "empShip", "empSvc"]:
         if col not in df.columns:
             df[col] = ""
     return df
@@ -1105,7 +1105,7 @@ def delete_wage_employee(name):
             return True
     return False
 
-def save_wage_product(product_name, wage_make=0, wage_pack=0, wage_ship=0, wage_svc=0, emp_make="", emp_pack="", emp_ship="", original_name=""):
+def save_wage_product(product_name, wage_make=0, wage_pack=0, wage_ship=0, wage_svc=0, emp_make="", emp_pack="", emp_ship="", emp_svc="", original_name=""):
     ws = get_worksheet_for_write("WageCatalog")
     if not ws:
         return False
@@ -1122,6 +1122,7 @@ def save_wage_product(product_name, wage_make=0, wage_pack=0, wage_ship=0, wage_
         "empMake":  ["empMake",  "emp_make"],
         "empPack":  ["empPack",  "emp_pack"],
         "empShip":  ["empShip",  "emp_ship"],
+        "empSvc":   ["empSvc",   "emp_svc"],
     }
     col_idx = {h: i + 1 for i, h in enumerate(header)}
 
@@ -1133,7 +1134,7 @@ def save_wage_product(product_name, wage_make=0, wage_pack=0, wage_ship=0, wage_
         return None
 
     # 若缺少員工欄位（新舊名稱都沒有），自動補上（先擴展欄數避免超出 grid limits）
-    missing_emp = [n for n, o in [("empMake", "emp_make"), ("empPack", "emp_pack"), ("empShip", "emp_ship")]
+    missing_emp = [n for n, o in [("empMake", "emp_make"), ("empPack", "emp_pack"), ("empShip", "emp_ship"), ("empSvc", "emp_svc")]
                    if n not in header and o not in header]
     if missing_emp:
         needed = len(header) + len(missing_emp)
@@ -1147,7 +1148,7 @@ def save_wage_product(product_name, wage_make=0, wage_pack=0, wage_ship=0, wage_
     field_map = {
         "wageMake": wage_make, "wagePack": wage_pack,
         "wageShip": wage_ship, "wageSvc":  wage_svc,
-        "empMake":  emp_make,  "empPack":  emp_pack, "empShip": emp_ship,
+        "empMake":  emp_make,  "empPack":  emp_pack, "empShip": emp_ship, "empSvc": emp_svc,
     }
 
     # 更新既有行（用 original_name 定位，若有改名則同步更新名稱欄）
@@ -1224,6 +1225,7 @@ def auto_create_wage_entries_for_order(order_no, order_date, keyer=""):
         ("製造", "wageMake", "empMake"),
         ("包裝", "wagePack", "empPack"),
         ("出貨", "wageShip", "empShip"),
+        ("服務費", "wageSvc", "empSvc"),
     ]
     count = 0
     date_str = str(order_date)
@@ -2167,20 +2169,27 @@ elif page == "🔨 製造作業":
                             cat_row = df_cat_mfg[df_cat_mfg['name'] == sel_cat].iloc[0]
                             w_make = float(cat_row.get('wageMake', 0) or 0)
                             w_pack = float(cat_row.get('wagePack', 0) or 0)
+                            w_svc  = float(cat_row.get('wageSvc', 0) or 0)
                             matched_items.append({
                                 'product_name': product_name, 'cat_name': sel_cat,
-                                'qty': qty, 'w_make': w_make, 'w_pack': w_pack
+                                'qty': qty, 'w_make': w_make, 'w_pack': w_pack, 'w_svc': w_svc
                             })
 
                     st.markdown("---")
-                    mc_p1, mc_p2 = st.columns(2)
+                    mc_p1, mc_p2, mc_p3 = st.columns(3)
                     mfg_maker = mc_p1.selectbox("👷 製造人員", KEYERS, key="mfg_maker")
                     mfg_packer = mc_p2.selectbox("📦 包裝人員", KEYERS, key="mfg_packer")
+                    mfg_svc = mc_p3.selectbox("🔧 服務人員", KEYERS, key="mfg_svc")
 
                     if matched_items:
                         total_make = sum(x['w_make'] * x['qty'] for x in matched_items)
                         total_pack = sum(x['w_pack'] * x['qty'] for x in matched_items)
-                        st.info(f"💰 製造工資合計: **${total_make:,.0f}**（{mfg_maker}）　包裝工資合計: **${total_pack:,.0f}**（{mfg_packer}）")
+                        total_svc  = sum(x['w_svc']  * x['qty'] for x in matched_items)
+                        parts = [f"製造 **${total_make:,.0f}**（{mfg_maker}）",
+                                 f"包裝 **${total_pack:,.0f}**（{mfg_packer}）"]
+                        if total_svc > 0:
+                            parts.append(f"服務費 **${total_svc:,.0f}**（{mfg_svc}）")
+                        st.info("💰 " + "　".join(parts))
                     else:
                         st.warning("⚠️ 沒有任何品項對應到工資產品")
 
@@ -2201,8 +2210,15 @@ elif page == "🔨 製造作業":
                                     round(mi['w_pack'] * mi['qty'], 2),
                                     f"訂單包裝｜{sel_mfg_ono}", mfg_packer)
                                 wage_count += 1
+                            if mi['w_svc'] > 0:
+                                add_wage_entry(
+                                    date.today().isoformat(), mfg_svc, "產品", "服務費",
+                                    mi['cat_name'], mi['qty'], mi['w_svc'],
+                                    round(mi['w_svc'] * mi['qty'], 2),
+                                    f"訂單服務｜{sel_mfg_ono}", mfg_svc)
+                                wage_count += 1
                         if wage_count > 0:
-                            st.success(f"✅ 已建立 {wage_count} 筆工資紀錄（製造：{mfg_maker}，包裝：{mfg_packer}）")
+                            st.success(f"✅ 已建立 {wage_count} 筆工資紀錄")
                         else:
                             st.warning("⚠️ 未建立任何工資紀錄（所有品項的工資金額為 0）")
                         time.sleep(1)
@@ -2261,7 +2277,15 @@ elif page == "📊 報表查詢":
 
     with tab_profit:
         st.markdown("##### 選擇月份")
-        profit_ym = st.text_input("年月（YYYY-MM）", value=date.today().strftime("%Y-%m"), max_chars=7, key="profit_ym")
+        _profit_months = []
+        for _pm_offset in range(12):
+            _pm_d = date.today().replace(day=1)
+            for _ in range(_pm_offset):
+                _pm_d = (_pm_d - timedelta(days=1)).replace(day=1)
+            _profit_months.append(_pm_d.strftime("%Y-%m"))
+        _profit_months = sorted(set(_profit_months), reverse=True)
+        _profit_cur = date.today().strftime("%Y-%m")
+        profit_ym = st.selectbox("月份", _profit_months, index=_profit_months.index(_profit_cur) if _profit_cur in _profit_months else 0, key="profit_ym")
 
         # ── 1. 訂單收入（已完成訂單）──
         df_orders_rpt = load_orders()
@@ -2544,7 +2568,15 @@ elif page == "💰 工資管理":
     with tab_report:
         st.markdown("##### 選擇月份")
         import datetime as _dt
-        rpt_ym = st.text_input("年月（YYYY-MM）", value=cur_ym, max_chars=7)
+        # 產生最近 12 個月的選項
+        _rpt_months = []
+        for _m_offset in range(12):
+            _m_d = date.today().replace(day=1)
+            for _ in range(_m_offset):
+                _m_d = (_m_d - timedelta(days=1)).replace(day=1)
+            _rpt_months.append(_m_d.strftime("%Y-%m"))
+        _rpt_months = sorted(set(_rpt_months), reverse=True)
+        rpt_ym = st.selectbox("月份", _rpt_months, index=_rpt_months.index(cur_ym) if cur_ym in _rpt_months else 0, key="rpt_ym_select")
 
         df_rpt = load_wage_entries(rpt_ym)
         settlements = load_wage_settlements()
@@ -2648,7 +2680,7 @@ elif page == "💰 工資管理":
         edit_mode = st.selectbox("選擇已有產品編輯（或留空新增）", ["（新增產品）"] + prod_list2)
 
         default_vals = {"wageMake": 0.0, "wagePack": 0.0, "wageShip": 0.0, "wageSvc": 0.0,
-                        "empMake": "", "empPack": "", "empShip": ""}
+                        "empMake": "", "empPack": "", "empShip": "", "empSvc": ""}
         default_name = ""
         if edit_mode != "（新增產品）" and not df_cat2.empty:
             row_e = df_cat2[df_cat2['name'] == edit_mode]
@@ -2656,7 +2688,7 @@ elif page == "💰 工資管理":
                 default_name = edit_mode
                 for k in ["wageMake", "wagePack", "wageShip", "wageSvc"]:
                     default_vals[k] = float(row_e.iloc[0].get(k, 0) or 0)
-                for k in ["empMake", "empPack", "empShip"]:
+                for k in ["empMake", "empPack", "empShip", "empSvc"]:
                     v = str(row_e.iloc[0].get(k, '') or '')
                     default_vals[k] = "" if v.lower() == 'nan' else v
 
@@ -2673,11 +2705,12 @@ elif page == "💰 工資管理":
 
             st.markdown("**訂單完成時自動帶入的員工**")
             st.caption("設定後，訂單變為「已完成」時會自動建立對應工資紀錄")
-            ea1, ea2, ea3 = st.columns(3)
+            ea1, ea2, ea3, ea4 = st.columns(4)
             def_idx = lambda k: emp_options.index(default_vals[k]) if default_vals[k] in emp_options else 0
             cp_emp_make = ea1.selectbox("製造負責人", emp_options, index=def_idx("empMake"), key="cp_em")
             cp_emp_pack = ea2.selectbox("包裝負責人", emp_options, index=def_idx("empPack"), key="cp_ep")
             cp_emp_ship = ea3.selectbox("出貨負責人", emp_options, index=def_idx("empShip"), key="cp_es")
+            cp_emp_svc  = ea4.selectbox("服務負責人", emp_options, index=def_idx("empSvc"),  key="cp_ev")
 
             if st.form_submit_button("💾 儲存產品", use_container_width=True):
                 if not cp_name.strip():
@@ -2686,8 +2719,9 @@ elif page == "💰 工資管理":
                     em = "" if cp_emp_make == "（不設定）" else cp_emp_make
                     ep = "" if cp_emp_pack == "（不設定）" else cp_emp_pack
                     es = "" if cp_emp_ship == "（不設定）" else cp_emp_ship
+                    ev = "" if cp_emp_svc  == "（不設定）" else cp_emp_svc
                     orig = edit_mode if edit_mode != "（新增產品）" else ""
-                    save_wage_product(cp_name.strip(), cp_make, cp_pack, cp_ship, cp_svc, em, ep, es, original_name=orig)
+                    save_wage_product(cp_name.strip(), cp_make, cp_pack, cp_ship, cp_svc, em, ep, es, ev, original_name=orig)
                     st.success(f"產品「{cp_name.strip()}」已儲存")
                     time.sleep(1)
                     st.rerun()
@@ -2695,10 +2729,11 @@ elif page == "💰 工資管理":
         st.markdown("---")
         st.markdown(f"##### 產品目錄（共 {len(df_cat2)} 項）")
         if not df_cat2.empty:
-            cat_disp_cols = ['name', 'wageMake', 'wagePack', 'wageShip', 'wageSvc', 'empMake', 'empPack', 'empShip']
+            cat_disp_cols = ['name', 'wageMake', 'wagePack', 'wageShip', 'wageSvc', 'empMake', 'empPack', 'empShip', 'empSvc']
             cat_disp_rename = {'name': '產品名稱', 'wageMake': '製造/件', 'wagePack': '包裝/件',
                                'wageShip': '出貨/件', 'wageSvc': '服務費/件',
-                               'empMake': '製造負責人', 'empPack': '包裝負責人', 'empShip': '出貨負責人'}
+                               'empMake': '製造負責人', 'empPack': '包裝負責人', 'empShip': '出貨負責人',
+                               'empSvc': '服務負責人'}
             cat_exist = [c for c in cat_disp_cols if c in df_cat2.columns]
             display_cat = df_cat2[cat_exist].rename(columns=cat_disp_rename)
             st.dataframe(display_cat, use_container_width=True, hide_index=True)
