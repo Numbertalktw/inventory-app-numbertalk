@@ -1329,8 +1329,82 @@ def mark_wage_settlement(year_month, total):
     clear_cache()
     return True
 
-def auto_create_wage_entries_for_order(order_no, order_date, keyer=""):
-    """訂單變為「已完成」時，自動依產品目錄建立製造/包裝/出貨/服務費工資紀錄（跳過已建立的階段）"""
+def _match_wage_catalog(product_name, df_cat):
+    """多層模糊比對產品目錄，回傳匹配的 Series 或 None"""
+    if df_cat.empty:
+        return None
+    cm = df_cat[df_cat['name'] == product_name]
+    if cm.empty:
+        cm = df_cat[df_cat['name'].apply(lambda n: n in product_name if n else False)]
+    if cm.empty and len(product_name) >= 8:
+        cm = df_cat[df_cat['name'].str.contains(product_name[:8], na=False, regex=False)]
+    if cm.empty and len(product_name) >= 4:
+        cm = df_cat[df_cat['name'].str.contains(product_name[:4], na=False, regex=False)]
+    if cm.empty:
+        return None
+    if len(cm) > 1:
+        cm = cm.loc[[cm['name'].str.len().idxmax()]]
+    return cm.iloc[0]
+
+def _get_existing_wage_keys(order_no):
+    """取得訂單已有的工資 (stage, item) 組合"""
+    df_existing = load_wage_entries()
+    keys = set()
+    if not df_existing.empty and 'note' in df_existing.columns:
+        mask = df_existing['note'].astype(str).str.contains(str(order_no), na=False)
+        if mask.any():
+            for _, er in df_existing[mask].iterrows():
+                keys.add((str(er.get('stage', '')), str(er.get('item', ''))))
+    return keys
+
+def create_wage_for_stages(order_no, order_date, items_df, df_cat, stages_with_emp, keyer=""):
+    """通用工資建立函式
+    stages_with_emp: list of (stage_name, wage_col, employee_name)
+    例: [("製造", "wageMake", "James"), ("出貨", "wageShip", "Imeng")]
+    """
+    if items_df.empty or df_cat.empty:
+        return 0
+    existing_keys = _get_existing_wage_keys(order_no)
+    count = 0
+    date_str = str(order_date)
+
+    for _, item in items_df.iterrows():
+        product_name = str(item.get('product_name', ''))
+        qty = float(item.get('qty', 1) or 1)
+        cat_row = _match_wage_catalog(product_name, df_cat)
+        if cat_row is None:
+            continue
+
+        for stage, wage_col, emp in stages_with_emp:
+            if (stage, product_name) in existing_keys:
+                continue
+            wage = float(cat_row.get(wage_col, 0) or 0)
+            if wage <= 0:
+                continue
+            if not emp or emp.lower() == 'nan':
+                continue
+            amount = round(wage * qty, 2)
+            add_wage_entry(
+                date_str=date_str,
+                employee_name=emp,
+                category="產品",
+                stage=stage,
+                item=product_name,
+                qty=qty,
+                price=wage,
+                amount=amount,
+                note=f"自動帶入｜訂單 {order_no}",
+                created_by=keyer
+            )
+            count += 1
+    return count
+
+def auto_create_wage_entries_for_order(order_no, order_date, keyer="", shipper="", service_person=""):
+    """訂單完成時自動建立工資：
+    - 製造/包裝：依每個品項的出庫倉庫（倉庫名 = 製造人）
+    - 出貨：用 shipper 參數（出貨作業選的人）
+    - 服務費：用 service_person 參數（製造作業選的人）
+    """
     items = load_order_items(order_no)
     if items.empty:
         return 0
@@ -1338,54 +1412,36 @@ def auto_create_wage_entries_for_order(order_no, order_date, keyer=""):
     if df_cat.empty:
         return 0
 
-    # 檢查已有哪些階段＋哪些商品的工資紀錄（避免重複）
-    df_existing = load_wage_entries()
-    existing_keys = set()  # (stage, item) 組合
-    if not df_existing.empty and 'note' in df_existing.columns:
-        mask = df_existing['note'].astype(str).str.contains(str(order_no), na=False)
-        if mask.any():
-            for _, er in df_existing[mask].iterrows():
-                existing_keys.add((str(er.get('stage', '')), str(er.get('item', ''))))
-
-    stages = [
-        ("製造", "wageMake", "empMake"),
-        ("包裝", "wagePack", "empPack"),
-        ("出貨", "wageShip", "empShip"),
-        ("服務費", "wageSvc", "empSvc"),
-    ]
+    existing_keys = _get_existing_wage_keys(order_no)
     count = 0
     date_str = str(order_date)
 
     for _, item in items.iterrows():
         product_name = str(item.get('product_name', ''))
         qty = float(item.get('qty', 1) or 1)
+        warehouse = str(item.get('warehouse', '')).strip()
 
-        # 比對產品目錄（多層模糊匹配）
-        cat_match = df_cat[df_cat['name'] == product_name]
-        if cat_match.empty:
-            # 訂單名稱包含目錄名稱（訂單名較長，如 "顯化蠟燭｜代點服務 (一組2顆)" 包含 "顯化蠟燭｜代點服務"）
-            cat_match = df_cat[df_cat['name'].apply(lambda n: n in product_name if n else False)]
-        if cat_match.empty:
-            # 目錄名稱包含訂單名稱前 8 字
-            cat_match = df_cat[df_cat['name'].str.contains(product_name[:8], na=False, regex=False)]
-        if cat_match.empty and len(product_name) >= 4:
-            # 前 4 字匹配
-            cat_match = df_cat[df_cat['name'].str.contains(product_name[:4], na=False, regex=False)]
-        if cat_match.empty:
+        cat_row = _match_wage_catalog(product_name, df_cat)
+        if cat_row is None:
             continue
-        # 若有多個匹配，取名稱最長的（最精確）
-        if len(cat_match) > 1:
-            cat_match = cat_match.loc[[cat_match['name'].str.len().idxmax()]]
-        cat_row = cat_match.iloc[0]
 
-        for stage, wage_col, emp_col in stages:
-            # 如果該階段 + 該商品已有紀錄，跳過
+        # 製造 → 倉庫名（誰的庫存 = 誰製造的）
+        # 包裝 → 同倉庫名
+        # 出貨 → shipper 參數
+        # 服務費 → service_person 參數
+        stage_emp = [
+            ("製造", "wageMake", warehouse),
+            ("包裝", "wagePack", warehouse),
+            ("出貨", "wageShip", shipper),
+            ("服務費", "wageSvc", service_person),
+        ]
+
+        for stage, wage_col, emp in stage_emp:
             if (stage, product_name) in existing_keys:
                 continue
             wage = float(cat_row.get(wage_col, 0) or 0)
             if wage <= 0:
                 continue
-            emp = str(cat_row.get(emp_col, '') or '').strip()
             if not emp or emp.lower() == 'nan':
                 emp = keyer if keyer else "未指定"
             amount = round(wage * qty, 2)
@@ -1432,28 +1488,16 @@ def backfill_wage_entries_for_month(year_month):
         if not items.empty and not df_cat.empty:
             for _, itm in items.iterrows():
                 pname = str(itm.get('product_name', ''))
-                # 嘗試匹配
-                cm = df_cat[df_cat['name'] == pname]
-                if cm.empty:
-                    cm = df_cat[df_cat['name'].apply(lambda n: n in pname if n else False)]
-                if cm.empty:
-                    cm = df_cat[df_cat['name'].str.contains(pname[:8], na=False, regex=False)] if len(pname) >= 8 else pd.DataFrame()
-                if cm.empty:
-                    cm = df_cat[df_cat['name'].str.contains(pname[:4], na=False, regex=False)] if len(pname) >= 4 else pd.DataFrame()
-                if cm.empty:
+                wh = str(itm.get('warehouse', '')).strip()
+                cr = _match_wage_catalog(pname, df_cat)
+                if cr is None:
                     warnings.append(f"⚠️ {ono}: 「{pname}」在工資目錄找不到對應產品")
                 else:
-                    if len(cm) > 1:
-                        cm = cm.loc[[cm['name'].str.len().idxmax()]]
-                    cr = cm.iloc[0]
-                    for stg, wcol, ecol in [("製造","wageMake","empMake"),("包裝","wagePack","empPack"),("出貨","wageShip","empShip"),("服務費","wageSvc","empSvc")]:
-                        w = float(cr.get(wcol, 0) or 0)
-                        e = str(cr.get(ecol, '') or '').strip()
-                        if w > 0 and (not e or e.lower() == 'nan'):
-                            warnings.append(f"ℹ️ {ono}: 「{pname}」{stg} 負責人未設定，將使用訂單建立者代替")
+                    if not wh:
+                        warnings.append(f"ℹ️ {ono}: 「{pname}」無出庫倉庫，製造/包裝負責人將使用訂單建立者")
 
         import time as _bt
-        n = auto_create_wage_entries_for_order(ono, odate, created_by)
+        n = auto_create_wage_entries_for_order(ono, odate, keyer=created_by)
         if n > 0:
             _bt.sleep(2)  # 避免 API 限流
             total_created += n
@@ -1674,12 +1718,13 @@ elif page == "🚚 出貨作業":
                             if wage_count > 0:
                                 st.info(f"💰 已建立 {wage_count} 筆出貨工資紀錄（出貨人員：{ship_user}）")
 
-                            # 3. 如果已完成，補建還沒建過的製造/包裝工資
+                            # 3. 如果已完成，補建還沒建過的製造/包裝/服務費工資
                             if target_st == "已完成":
                                 w_extra = auto_create_wage_entries_for_order(
-                                    sel_ship_ono, sel_ship_row.get('order_date', date.today()), ship_user)
+                                    sel_ship_ono, sel_ship_row.get('order_date', date.today()),
+                                    keyer=ship_user, shipper=ship_user)
                                 if w_extra > 0:
-                                    st.info(f"💰 另補建 {w_extra} 筆製造/包裝工資紀錄")
+                                    st.info(f"💰 另補建 {w_extra} 筆工資紀錄")
                             time.sleep(1)
                             st.rerun()
                         else:
@@ -1967,6 +2012,21 @@ elif page == "🛒 訂單管理":
                                         time.sleep(1)
                                         st.rerun()
 
+                        # === 此訂單的工資紀錄 ===
+                        _df_all_wages = load_wage_entries()
+                        _existing_wage = pd.DataFrame()
+                        if not _df_all_wages.empty and 'note' in _df_all_wages.columns:
+                            _mask = _df_all_wages['note'].astype(str).str.contains(ono, na=False)
+                            if _mask.any():
+                                _existing_wage = _df_all_wages[_mask]
+                        if not _existing_wage.empty:
+                            st.markdown("---")
+                            st.markdown(f"##### 💰 工資紀錄（{len(_existing_wage)} 筆）")
+                            _ew_cols = [c for c in ['stage', 'employee_name', 'item', 'amount', 'paid'] if c in _existing_wage.columns]
+                            _ew_disp = _existing_wage[_ew_cols].rename(
+                                columns={'stage': '階段', 'employee_name': '負責人', 'item': '品項', 'amount': '金額', 'paid': '已發'})
+                            st.dataframe(_ew_disp, use_container_width=True, hide_index=True)
+
                         # === 下拉式狀態選單 ===
                         st.markdown("---")
                         all_statuses = ["已確認", "未付款/未出貨", "已付款/未出貨", "未付款/已出貨", "已完成"]
@@ -1992,7 +2052,7 @@ elif page == "🛒 訂單管理":
                                         if new_st == "已完成":
                                             w_cnt = auto_create_wage_entries_for_order(
                                                 ono, row.get('order_date', date.today()),
-                                                ship_user if need_ship else "")
+                                                keyer=ship_user, shipper=ship_user)
                                             if w_cnt > 0:
                                                 st.info(f"💰 已自動建立 {w_cnt} 筆工資紀錄")
                                         time.sleep(1)
@@ -2004,7 +2064,7 @@ elif page == "🛒 訂單管理":
                                         st.success(f"狀態已更新為: {new_st}")
                                         if new_st == "已完成":
                                             w_cnt = auto_create_wage_entries_for_order(
-                                                ono, row.get('order_date', date.today()), "")
+                                                ono, row.get('order_date', date.today()))
                                             if w_cnt > 0:
                                                 st.info(f"💰 已自動建立 {w_cnt} 筆工資紀錄")
                                         time.sleep(1)
@@ -2021,13 +2081,13 @@ elif page == "🛒 訂單管理":
                         if status == "已完成":
                             st.markdown("---")
                             if st.button("💰 補建工資紀錄", key=f"{kp}_wage_{ono}",
-                                         help="根據產品目錄設定，為此訂單補建工資紀錄"):
+                                         help="依出庫倉庫自動匹配製造/包裝負責人"):
                                 w_cnt = auto_create_wage_entries_for_order(
-                                    ono, row.get('order_date', date.today()), "")
+                                    ono, row.get('order_date', date.today()))
                                 if w_cnt > 0:
-                                    st.success(f"✅ 已補建 {w_cnt} 筆工資紀錄")
+                                    st.success(f"✅ 已補建 {w_cnt} 筆工資紀錄（製造/包裝依出庫倉庫自動分配）")
                                 else:
-                                    st.warning("⚠️ 未建立任何工資紀錄，請確認「工資管理 → 產品目錄」已設定負責員工")
+                                    st.info("此訂單的工資紀錄已齊全")
                                 time.sleep(1)
                                 st.rerun()
 
