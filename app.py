@@ -1268,7 +1268,7 @@ def mark_wage_settlement(year_month, total):
     return True
 
 def auto_create_wage_entries_for_order(order_no, order_date, keyer=""):
-    """訂單變為「已完成」時，自動依產品目錄建立製造/包裝/出貨工資紀錄（跳過已建立的階段）"""
+    """訂單變為「已完成」時，自動依產品目錄建立製造/包裝/出貨/服務費工資紀錄（跳過已建立的階段）"""
     items = load_order_items(order_no)
     if items.empty:
         return 0
@@ -1276,13 +1276,14 @@ def auto_create_wage_entries_for_order(order_no, order_date, keyer=""):
     if df_cat.empty:
         return 0
 
-    # 檢查已有哪些階段的工資紀錄（避免與製造作業/出貨作業重複建立）
+    # 檢查已有哪些階段＋哪些商品的工資紀錄（避免重複）
     df_existing = load_wage_entries()
-    existing_stages = set()
+    existing_keys = set()  # (stage, item) 組合
     if not df_existing.empty and 'note' in df_existing.columns:
         mask = df_existing['note'].astype(str).str.contains(str(order_no), na=False)
         if mask.any():
-            existing_stages = set(df_existing[mask]['stage'].astype(str).tolist())
+            for _, er in df_existing[mask].iterrows():
+                existing_keys.add((str(er.get('stage', '')), str(er.get('item', ''))))
 
     stages = [
         ("製造", "wageMake", "empMake"),
@@ -1306,8 +1307,8 @@ def auto_create_wage_entries_for_order(order_no, order_date, keyer=""):
         cat_row = cat_match.iloc[0]
 
         for stage, wage_col, emp_col in stages:
-            # 如果該階段已有紀錄（從製造/出貨作業頁面建立），跳過
-            if stage in existing_stages:
+            # 如果該階段 + 該商品已有紀錄，跳過
+            if (stage, product_name) in existing_keys:
                 continue
             wage = float(cat_row.get(wage_col, 0) or 0)
             emp = str(cat_row.get(emp_col, '') or '').strip()
@@ -1327,6 +1328,29 @@ def auto_create_wage_entries_for_order(order_no, order_date, keyer=""):
                 )
                 count += 1
     return count
+
+def backfill_wage_entries_for_month(year_month):
+    """補建指定月份所有已完成訂單的缺失工資紀錄"""
+    df_orders = load_orders()
+    if df_orders.empty:
+        return 0, 0
+    completed = df_orders[
+        (df_orders['status'] == '已完成') &
+        (df_orders['order_date'].astype(str).str.startswith(year_month))
+    ]
+    if completed.empty:
+        return 0, 0
+    total_created = 0
+    order_count = 0
+    for _, order in completed.iterrows():
+        ono = str(order.get('order_no', ''))
+        odate = str(order.get('order_date', ''))
+        created_by = str(order.get('created_by', ''))
+        n = auto_create_wage_entries_for_order(ono, odate, created_by)
+        if n > 0:
+            total_created += n
+            order_count += 1
+    return order_count, total_created
 
 # ==========================================
 # 4. 主程式分頁
@@ -2646,6 +2670,17 @@ elif page == "💰 工資管理":
         df_rpt = load_wage_entries(rpt_ym)
         settlements = load_wage_settlements()
         is_settled = rpt_ym in settlements
+
+        # 補建工資按鈕（放在報表最上方）
+        if st.button(f"🔄 補建 {rpt_ym} 缺失工資", key=f"backfill_{rpt_ym}", help="掃描該月已完成訂單，自動補建缺失的製造/包裝/出貨/服務費工資"):
+            with st.spinner("掃描訂單並補建工資中..."):
+                bf_orders, bf_entries = backfill_wage_entries_for_month(rpt_ym)
+            if bf_entries > 0:
+                st.success(f"✅ 已為 {bf_orders} 筆訂單補建 {bf_entries} 筆工資紀錄")
+                time.sleep(1.5)
+                st.rerun()
+            else:
+                st.info("所有已完成訂單的工資紀錄皆已齊全，無需補建")
 
         if df_rpt.empty:
             st.info(f"**{rpt_ym}** 尚無工資紀錄")
