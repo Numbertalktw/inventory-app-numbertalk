@@ -200,17 +200,29 @@ def get_worksheet_for_write(sheet_name):
     except:
         return None
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=120)
 def load_data(sheet_name):
-    try:
-        ws = get_worksheet(sheet_name)
-        if ws is None: return pd.DataFrame()
-        data = ws.get_all_records()
-        df = pd.DataFrame(data)
-        for col in ['sku', 'name', 'category', 'series', 'spec', 'color', 'note', 'price']:
-            if col not in df.columns: df[col] = ""
-        return df.fillna("")
-    except: return pd.DataFrame()
+    import time as _time
+    ws = get_worksheet(sheet_name)
+    if ws is None:
+        return pd.DataFrame()
+    for _attempt in range(3):
+        try:
+            data = ws.get_all_records()
+            df = pd.DataFrame(data)
+            for col in ['sku', 'name', 'category', 'series', 'spec', 'color', 'note', 'price']:
+                if col not in df.columns:
+                    df[col] = ""
+            return df.fillna("")
+        except Exception as _api_err:
+            if '429' in str(_api_err) and _attempt < 2:
+                _time.sleep(3 + _attempt * 3)
+                continue
+            elif '429' in str(_api_err):
+                # 429 錯誤不要快取空結果，直接 raise 讓 Streamlit 不快取
+                raise
+            return pd.DataFrame()
+    return pd.DataFrame()
 
 def clear_cache():
     load_data.clear()
@@ -245,7 +257,7 @@ def ensure_price_column():
     except:
         pass
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=300)
 def load_product_prices():
     ws = get_worksheet("Products")
     if not ws:
@@ -944,6 +956,8 @@ WAGE_STAGES = ["製造", "包裝", "出貨", "服務費"]
 
 def ensure_wage_sheets():
     """確保工資相關工作表存在，不存在則自動建立（使用新鮮連線避免 token 過期）"""
+    if st.session_state.get('_wage_sheets_ok'):
+        return
     import uuid as _uuid
     client = get_fresh_client()
     if not client:
@@ -985,12 +999,19 @@ def ensure_wage_sheets():
 
     # WageEntries
     if "WageEntries" not in existing_titles:
-        ws_ent = sh.add_worksheet(title="WageEntries", rows=2000, cols=13)
-        ws_ent.append_row(["id", "date", "employee_name", "category", "stage", "item", "qty", "price", "amount", "note", "created_by", "created_at"])
+        ws_ent = sh.add_worksheet(title="WageEntries", rows=2000, cols=14)
+        ws_ent.append_row(["id", "date", "employee_name", "category", "stage", "item", "qty", "price", "amount", "note", "created_by", "created_at", "paid"])
     else:
         ws_ent = sh.worksheet("WageEntries")
-        if not ws_ent.row_values(1):
-            ws_ent.append_row(["id", "date", "employee_name", "category", "stage", "item", "qty", "price", "amount", "note", "created_by", "created_at"])
+        header = ws_ent.row_values(1)
+        if not header:
+            ws_ent.append_row(["id", "date", "employee_name", "category", "stage", "item", "qty", "price", "amount", "note", "created_by", "created_at", "paid"])
+        elif "paid" not in header:
+            # 既有工作表補上 paid 欄位
+            new_col = len(header) + 1
+            if ws_ent.col_count < new_col:
+                ws_ent.resize(cols=new_col + 2)
+            ws_ent.update_cell(1, new_col, "paid")
 
     # WageSettlements
     if "WageSettlements" not in existing_titles:
@@ -1001,7 +1022,7 @@ def ensure_wage_sheets():
         if not ws_set.row_values(1):
             ws_set.append_row(["year_month", "settled_at", "total"])
 
-    clear_cache()
+    st.session_state['_wage_sheets_ok'] = True
 
 def load_wage_employees():
     df = load_data("WageEmployees")
@@ -1048,10 +1069,20 @@ def load_wage_catalog():
 def load_wage_entries(year_month=None):
     df = load_data("WageEntries")
     if df.empty or 'date' not in df.columns:
-        return pd.DataFrame(columns=["id", "date", "employee_name", "category", "stage", "item", "qty", "price", "amount", "note"])
+        return pd.DataFrame(columns=["id", "date", "employee_name", "category", "stage", "item", "qty", "price", "amount", "note", "paid"])
+    # 相容使用者在 Google Sheets 改過的欄位名稱
+    _rename_map = {}
+    if 'entry_id' in df.columns and 'id' not in df.columns:
+        _rename_map['entry_id'] = 'id'
+    if 'item_name' in df.columns and 'item' not in df.columns:
+        _rename_map['item_name'] = 'item'
+    if _rename_map:
+        df = df.rename(columns=_rename_map)
     for col in ["qty", "price", "amount"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+    if 'paid' not in df.columns:
+        df['paid'] = ""
     if year_month:
         df = df[df['date'].astype(str).str.startswith(year_month)]
     return df
@@ -1067,9 +1098,41 @@ def add_wage_entry(date_str, employee_name, category, stage, item, qty, price, a
     entry_id = str(uuid.uuid4())[:8]
     created_at = dt.datetime.now().isoformat()
     ws = get_worksheet_for_write("WageEntries")
-    ws.append_row([entry_id, date_str, employee_name, category, stage or "", item, qty or "", price or "", amount, note, created_by, created_at])
+    ws.append_row([entry_id, date_str, employee_name, category, stage or "", item, qty or "", price or "", amount, note, created_by, created_at, ""])
     clear_cache()
     return True
+
+def mark_wage_entry_paid(entry_id, paid=True):
+    """標記單筆工資為已發放或未發放"""
+    ws = get_worksheet_for_write("WageEntries")
+    if not ws:
+        return False
+    data = ws.get_all_values()
+    if not data:
+        return False
+    header = data[0]
+    id_col = None
+    paid_col = None
+    for i, h in enumerate(header):
+        if h.strip().lower() in ('id', 'entry_id'):
+            id_col = i
+        if h.strip().lower() == 'paid':
+            paid_col = i
+    if id_col is None:
+        return False
+    if paid_col is None:
+        # 自動補 paid 欄位
+        paid_col = len(header)
+        if ws.col_count <= paid_col:
+            ws.resize(cols=paid_col + 2)
+        ws.update_cell(1, paid_col + 1, "paid")
+    for row_idx, row in enumerate(data[1:], start=2):
+        cell_id = row[id_col] if id_col < len(row) else ""
+        if str(cell_id).strip() == str(entry_id).strip():
+            ws.update_cell(row_idx, paid_col + 1, "Y" if paid else "")
+            clear_cache()
+            return True
+    return False
 
 def delete_wage_entry(entry_id):
     ws = get_worksheet_for_write("WageEntries")
@@ -2540,15 +2603,17 @@ elif page == "💰 工資管理":
             total_this = df_this['amount'].sum()
             st.markdown(f"共 **{len(df_this)}** 筆　合計 **NT$ {total_this:,.0f}**")
             for w_idx, (_, er) in enumerate(df_this.sort_values('date', ascending=False).iterrows()):
-                ec1, ec2, ec3, ec4, ec5, ec6 = st.columns([1.5, 1.5, 2, 2, 1.2, 0.8])
+                ec1, ec2, ec3, ec4, ec5, ec6, ec7 = st.columns([1.2, 1.2, 1.8, 1.8, 1, 0.6, 0.6])
                 ec1.text(str(er.get('date', '')))
                 ec2.text(str(er.get('employee_name', '')))
                 cat_txt = str(er.get('category', ''))
                 stg_txt = str(er.get('stage', ''))
                 ec3.text(f"{cat_txt}{' · ' + stg_txt if stg_txt else ''}")
                 ec4.text(str(er.get('item', '')))
-                ec5.text(f"NT$ {float(er.get('amount', 0)):,.0f}")
-                if ec6.button("🗑️", key=f"wage_del_{w_idx}_{er.get('id', '')}"):
+                ec5.text(f"${float(er.get('amount', 0)):,.0f}")
+                _is_p = str(er.get('paid', '')).upper() == 'Y'
+                ec6.markdown("✅" if _is_p else "⏳")
+                if ec7.button("🗑️", key=f"wage_del_{w_idx}_{er.get('id', '')}"):
                     if delete_wage_entry(str(er.get('id', ''))):
                         st.success("已刪除")
                         time.sleep(1)
@@ -2586,21 +2651,25 @@ elif page == "💰 工資管理":
             st.info(f"**{rpt_ym}** 尚無工資紀錄")
         else:
             grand_total = df_rpt['amount'].sum()
-            st.markdown(f"#### {rpt_ym} 工資彙總　合計 **NT$ {grand_total:,.0f}**")
-
-            if is_settled:
-                st.success(f"✅ 已於 {settlements[rpt_ym][:10]} 結算")
-            else:
-                st.warning("⚠️ 本月尚未結算")
+            paid_total = df_rpt[df_rpt['paid'].astype(str).str.upper() == 'Y']['amount'].sum()
+            unpaid_total = grand_total - paid_total
+            rc1, rc2, rc3 = st.columns(3)
+            rc1.metric("合計", f"NT$ {grand_total:,.0f}")
+            rc2.metric("已發放", f"NT$ {paid_total:,.0f}")
+            rc3.metric("未發放", f"NT$ {unpaid_total:,.0f}")
 
             # 確保必要欄位存在
-            for _col in ['employee_name', 'amount', 'category', 'stage']:
+            for _col in ['employee_name', 'amount', 'category', 'stage', 'id']:
                 if _col not in df_rpt.columns:
                     df_rpt[_col] = ""
 
             # 按員工分組
             for emp_name, grp in df_rpt.groupby('employee_name'):
-                with st.expander(f"👷 {emp_name}　NT$ {grp['amount'].sum():,.0f}"):
+                emp_total = grp['amount'].sum()
+                emp_paid = grp[grp['paid'].astype(str).str.upper() == 'Y']['amount'].sum()
+                emp_unpaid = emp_total - emp_paid
+                paid_badge = "✅ 全部已發放" if emp_unpaid <= 0 else f"⏳ 未發放 NT$ {emp_unpaid:,.0f}"
+                with st.expander(f"👷 {emp_name}　NT$ {emp_total:,.0f}　{paid_badge}"):
                     grp_by_cols = [c for c in ['category', 'stage'] if c in grp.columns]
                     if grp_by_cols:
                         cat_summary = grp.groupby(grp_by_cols)['amount'].sum().reset_index()
@@ -2610,30 +2679,39 @@ elif page == "💰 工資管理":
                                 cat_lbl += f" · {cs['stage']}"
                             st.write(f"  {cat_lbl}：NT$ {cs['amount']:,.0f}")
                     st.markdown("---")
-                    grp_cols = ['date', 'category', 'stage', 'item', 'qty', 'price', 'amount', 'note']
-                    grp_rename = {'date': '日期', 'category': '類別', 'stage': '階段',
-                                  'item': '項目', 'qty': '數量', 'price': '單價',
-                                  'amount': '金額', 'note': '備註'}
-                    grp_exist = [c for c in grp_cols if c in grp.columns]
-                    st.dataframe(
-                        grp[grp_exist].rename(columns=grp_rename),
-                        use_container_width=True, hide_index=True
-                    )
+                    # 顯示每筆工資及發放狀態
+                    for _wi, (_, _wr) in enumerate(grp.sort_values('date', ascending=False).iterrows()):
+                        _wc1, _wc2, _wc3, _wc4, _wc5, _wc6 = st.columns([1.2, 1.5, 2, 1.2, 1, 1])
+                        _wc1.text(str(_wr.get('date', ''))[-5:])
+                        _stg = str(_wr.get('stage', ''))
+                        _wc2.text(_stg if _stg else str(_wr.get('category', '')))
+                        _wc3.text(str(_wr.get('item', '')))
+                        _wc4.text(f"${float(_wr.get('amount', 0)):,.0f}")
+                        _is_paid = str(_wr.get('paid', '')).upper() == 'Y'
+                        _entry_id = str(_wr.get('id', ''))
+                        if _is_paid:
+                            _wc5.markdown("✅ 已發")
+                            if _wc6.button("↩️", key=f"unpay_{rpt_ym}_{_wi}_{_entry_id}", help="取消發放"):
+                                mark_wage_entry_paid(_entry_id, paid=False)
+                                st.rerun()
+                        else:
+                            _wc5.markdown("⏳ 未發")
+                            if _wc6.button("💰", key=f"pay_{rpt_ym}_{_wi}_{_entry_id}", help="標記已發放"):
+                                mark_wage_entry_paid(_entry_id, paid=True)
+                                st.rerun()
+                    # 一鍵發放此員工全部
+                    _emp_unpaid_ids = [str(r.get('id', '')) for _, r in grp.iterrows() if str(r.get('paid', '')).upper() != 'Y']
+                    if _emp_unpaid_ids:
+                        if st.button(f"💰 全部標記已發放（{emp_name}）", key=f"payall_{rpt_ym}_{emp_name}", use_container_width=True):
+                            for _eid in _emp_unpaid_ids:
+                                mark_wage_entry_paid(_eid, paid=True)
+                            st.rerun()
 
             st.divider()
-            if not is_settled:
-                if st.button(f"✅ 標記 {rpt_ym} 為已結算", type="primary", use_container_width=True):
-                    if mark_wage_settlement(rpt_ym, grand_total):
-                        st.success(f"已標記 {rpt_ym} 結算，總額 NT$ {grand_total:,.0f}")
-                        time.sleep(1)
-                        st.rerun()
-            else:
-                st.info(f"此月份已結算（NT$ {grand_total:,.0f}）")
-
-            rpt_cols = ['date', 'employee_name', 'category', 'stage', 'item', 'qty', 'price', 'amount', 'note']
+            rpt_cols = ['date', 'employee_name', 'category', 'stage', 'item', 'qty', 'price', 'amount', 'paid', 'note']
             rpt_rename = {'date': '日期', 'employee_name': '員工', 'category': '類別',
                           'stage': '階段', 'item': '項目', 'qty': '數量',
-                          'price': '單價', 'amount': '金額', 'note': '備註'}
+                          'price': '單價', 'amount': '金額', 'paid': '已發放', 'note': '備註'}
             exist_rpt_cols = [c for c in rpt_cols if c in df_rpt.columns]
             csv_rpt = df_rpt[exist_rpt_cols].rename(columns=rpt_rename)
             st.download_button("⬇️ 匯出報表 CSV", csv_rpt.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig'),
