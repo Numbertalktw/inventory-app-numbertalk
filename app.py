@@ -438,8 +438,8 @@ def ensure_order_sheets():
             ws = sh.add_worksheet(title="Orders", rows=1000, cols=20)
             ws.append_row(["order_no", "order_date", "customer_name", "customer_phone",
                            "customer_email", "shipping_address", "status", "total_amount",
-                           "note", "created_by", "created_at", "discount", "shipping_fee",
-                           "items_total", "birthday", "lunar_birthday", "birth_time", "items_detail"])
+                           "items_detail", "note", "created_by", "created_at", "discount",
+                           "shipping_fee", "items_total", "birthday", "lunar_birthday", "birth_time"])
         if "OrderItems" not in existing:
             ws = sh.add_worksheet(title="OrderItems", rows=5000, cols=8)
             ws.append_row(["order_no", "sku", "product_name", "qty", "unit_price",
@@ -463,13 +463,36 @@ def ensure_extra_columns():
                 extra.append("items_detail")
             missing = [c for c in extra if c not in cur_header]
             if missing:
-                # 先擴展欄數，避免超出 grid limits
                 needed_total = len(cur_header) + len(missing)
                 if ws_w.col_count < needed_total:
                     ws_w.resize(cols=needed_total + 5)
                 for col_name in missing:
                     ws_w.update_cell(1, len(cur_header) + 1, col_name)
                     cur_header.append(col_name)
+
+            # 把 items_detail 移到 total_amount 後面（如果目前在太後面）
+            if sheet_name == "Orders" and "items_detail" in cur_header and "total_amount" in cur_header:
+                detail_idx = cur_header.index("items_detail")
+                target_idx = cur_header.index("total_amount") + 1
+                if detail_idx > target_idx + 3:  # 只在差距很大時才搬移
+                    try:
+                        sh = get_spreadsheet()
+                        ws_id = ws_w.id
+                        sh.batch_update({
+                            "requests": [{
+                                "moveDimension": {
+                                    "source": {
+                                        "sheetId": ws_id,
+                                        "dimension": "COLUMNS",
+                                        "startIndex": detail_idx,
+                                        "endIndex": detail_idx + 1
+                                    },
+                                    "destinationIndex": target_idx
+                                }
+                            }]
+                        })
+                    except Exception:
+                        pass
         st.session_state['_extra_cols_ok'] = True
     except Exception:
         pass
