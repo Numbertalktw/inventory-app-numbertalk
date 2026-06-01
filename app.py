@@ -474,25 +474,28 @@ def ensure_extra_columns():
             if sheet_name == "Orders" and "items_detail" in cur_header and "total_amount" in cur_header:
                 detail_idx = cur_header.index("items_detail")
                 target_idx = cur_header.index("total_amount") + 1
-                if detail_idx > target_idx + 3:  # 只在差距很大時才搬移
+                if detail_idx > target_idx + 3:
                     try:
-                        sh = get_spreadsheet()
-                        ws_id = ws_w.id
-                        sh.batch_update({
-                            "requests": [{
-                                "moveDimension": {
-                                    "source": {
-                                        "sheetId": ws_id,
-                                        "dimension": "COLUMNS",
-                                        "startIndex": detail_idx,
-                                        "endIndex": detail_idx + 1
-                                    },
-                                    "destinationIndex": target_idx
-                                }
-                            }]
-                        })
-                    except Exception:
-                        pass
+                        fresh_client = get_fresh_client()
+                        if fresh_client:
+                            fresh_sh = fresh_client.open(SPREADSHEET_NAME)
+                            fresh_ws = fresh_sh.worksheet("Orders")
+                            fresh_sh.batch_update({
+                                "requests": [{
+                                    "moveDimension": {
+                                        "source": {
+                                            "sheetId": fresh_ws.id,
+                                            "dimension": "COLUMNS",
+                                            "startIndex": detail_idx,
+                                            "endIndex": detail_idx + 1
+                                        },
+                                        "destinationIndex": target_idx
+                                    }
+                                }]
+                            })
+                            clear_cache()
+                    except Exception as _move_err:
+                        st.warning(f"items_detail 欄位搬移失敗：{_move_err}")
         st.session_state['_extra_cols_ok'] = True
     except Exception:
         pass
