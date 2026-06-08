@@ -2322,9 +2322,9 @@ elif page == "🛒 訂單管理":
                                         st.rerun()
 
                             if status in ["已確認", "已成立", "待處理"]:
-                                if ac2.button("刪除", key=f"{kp}_del_{ono}"):
-                                    if delete_order(ono):
-                                        st.success("訂單已刪除")
+                                if ac2.button("❌ 取消訂單", key=f"{kp}_del_{ono}"):
+                                    if update_order_status(ono, "已取消"):
+                                        st.success("訂單已取消")
                                         time.sleep(1)
                                         st.rerun()
 
