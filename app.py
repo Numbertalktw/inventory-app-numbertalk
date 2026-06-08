@@ -440,7 +440,7 @@ def ensure_order_sheets():
                            "birthday", "lunar_birthday", "birth_time",
                            "customer_phone", "customer_email", "shipping_address",
                            "status", "items_detail", "note",
-                           "total_amount", "discount", "shipping_fee", "items_total",
+                           "total_amount", "items_total", "discount", "shipping_fee",
                            "created_by", "created_at"])
         if "OrderItems" not in existing:
             ws = sh.add_worksheet(title="OrderItems", rows=5000, cols=8)
@@ -481,7 +481,7 @@ DESIRED_ORDER_COLUMNS = [
     "birthday", "lunar_birthday", "birth_time",
     "customer_phone", "customer_email", "shipping_address",
     "status", "items_detail", "note",
-    "total_amount", "discount", "shipping_fee", "items_total",
+    "total_amount", "items_total", "discount", "shipping_fee",
     "created_by", "created_at"
 ]
 
@@ -576,7 +576,7 @@ def reorganize_orders_columns():
 def batch_recalc_all_orders(progress_cb=None):
     """批次重算所有訂單金額（從 OrderItems 重新加總，搭配 discount / shipping_fee 算出應付總額）
 
-    total_amount = 應付總額（商品小計 − 折扣 + 運費），items_total = 商品小計
+    total_amount = 應付總額（items_total − discount + shipping_fee），items_total = 商品小計
     同時刷新 items_detail 摘要欄位。
     使用單次讀 + 單次寫，最大限度減少 API 呼叫。
 
