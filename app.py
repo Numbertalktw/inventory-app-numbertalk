@@ -440,7 +440,7 @@ def ensure_order_sheets():
                            "birthday", "lunar_birthday", "birth_time",
                            "customer_phone", "customer_email", "shipping_address",
                            "status", "items_detail", "note",
-                           "total_amount", "items_total", "discount", "shipping_fee",
+                           "total_amount", "discount", "shipping_fee", "items_total",
                            "created_by", "created_at"])
         if "OrderItems" not in existing:
             ws = sh.add_worksheet(title="OrderItems", rows=5000, cols=8)
@@ -481,7 +481,7 @@ DESIRED_ORDER_COLUMNS = [
     "birthday", "lunar_birthday", "birth_time",
     "customer_phone", "customer_email", "shipping_address",
     "status", "items_detail", "note",
-    "total_amount", "items_total", "discount", "shipping_fee",
+    "total_amount", "discount", "shipping_fee", "items_total",
     "created_by", "created_at"
 ]
 
@@ -489,8 +489,8 @@ DESIRED_ORDER_COLUMNS = [
 _CN_TO_EN_COL = {
     "優惠折扣": "discount",
     "運費": "shipping_fee",
-    "應付總額": "items_total",
-    "商品小計": "total_amount",
+    "應付總額": "total_amount",
+    "商品小計": "items_total",
     "訂單編號": "order_no",
     "訂單日期": "order_date",
     "客戶名稱": "customer_name",
@@ -509,7 +509,7 @@ _CN_TO_EN_COL = {
 
 
 def reorganize_orders_columns():
-    """一次性遷移：重整 Orders 工作表欄位順序、移除重複欄位、交換舊資料的 total_amount/items_total 值"""
+    """一次性遷移：重整 Orders 工作表欄位順序、移除重複欄位"""
     client = get_fresh_client()
     if not client:
         return False, "Google 連線失敗"
@@ -527,7 +527,6 @@ def reorganize_orders_columns():
     rows = all_data[1:]
 
     # ── 1. 將每個欄位標題對應到標準英文名稱 ──
-    # col_groups[canonical_name] = [(col_index, original_header_name), ...]
     col_groups = {}
     for idx, name in enumerate(header):
         canonical = _CN_TO_EN_COL.get(name, name)
@@ -536,12 +535,11 @@ def reorganize_orders_columns():
         col_groups[canonical].append((idx, name))
 
     # ── 2. 重複欄位只保留資料最多的那一欄 ──
-    best_col = {}  # canonical_name → col_index
+    best_col = {}
     for canonical, positions in col_groups.items():
         if len(positions) == 1:
             best_col[canonical] = positions[0][0]
         else:
-            # 選資料筆數最多的欄位
             best_idx, best_count = positions[0][0], -1
             for pos_idx, _ in positions:
                 count = sum(1 for row in rows if pos_idx < len(row) and str(row[pos_idx]).strip())
@@ -550,11 +548,8 @@ def reorganize_orders_columns():
                     best_idx = pos_idx
             best_col[canonical] = best_idx
 
-    # ── 3. 組裝新資料（依 DESIRED_ORDER_COLUMNS 排列） ──
+    # ── 3. 組裝新資料（依 DESIRED_ORDER_COLUMNS 排列，不交換值） ──
     new_header = list(DESIRED_ORDER_COLUMNS)
-    ta_new_pos = DESIRED_ORDER_COLUMNS.index("total_amount")
-    it_new_pos = DESIRED_ORDER_COLUMNS.index("items_total")
-
     new_rows = []
     for row in rows:
         new_row = []
@@ -564,10 +559,6 @@ def reorganize_orders_columns():
                 new_row.append(row[src_idx])
             else:
                 new_row.append("")
-        # 交換 total_amount / items_total 的值
-        # 舊程式: total_amount=最終金額, items_total=商品小計
-        # 新程式: total_amount=商品小計, items_total=最終金額(應付總額)
-        new_row[ta_new_pos], new_row[it_new_pos] = new_row[it_new_pos], new_row[ta_new_pos]
         new_rows.append(new_row)
 
     # ── 4. 清除並重寫工作表 ──
@@ -585,7 +576,7 @@ def reorganize_orders_columns():
 def batch_recalc_all_orders(progress_cb=None):
     """批次重算所有訂單金額（從 OrderItems 重新加總，搭配 discount / shipping_fee 算出應付總額）
 
-    新格式：total_amount = 商品小計，items_total = 應付總額（商品小計 − 折扣 + 運費）
+    total_amount = 應付總額（商品小計 − 折扣 + 運費），items_total = 商品小計
     同時刷新 items_detail 摘要欄位。
     使用單次讀 + 單次寫，最大限度減少 API 呼叫。
 
@@ -651,8 +642,9 @@ def batch_recalc_all_orders(progress_cb=None):
         })
 
     # ── 3. 逐筆重算 ──
-    ta_i = o_col['total_amount']       # → 商品小計
-    it_i = o_col['items_total']        # → 應付總額
+    # total_amount = 應付總額（最終金額），items_total = 商品小計（品項原始加總）
+    ta_i = o_col['total_amount']       # → 應付總額
+    it_i = o_col['items_total']        # → 商品小計
     disc_i = o_col['discount']
     ship_i = o_col['shipping_fee']
     detail_i = o_col.get('items_detail')
@@ -683,13 +675,13 @@ def batch_recalc_all_orders(progress_cb=None):
 
         final_total = items_sum - discount + shipping
 
-        # 新格式：total_amount = 商品小計，items_total = 應付總額
+        # total_amount = 應付總額，items_total = 商品小計
         changed = False
-        if abs(_sf(row[ta_i]) - items_sum) > 0.01:
-            row[ta_i] = items_sum
+        if abs(_sf(row[ta_i]) - final_total) > 0.01:
+            row[ta_i] = final_total
             changed = True
-        if abs(_sf(row[it_i]) - final_total) > 0.01:
-            row[it_i] = final_total
+        if abs(_sf(row[it_i]) - items_sum) > 0.01:
+            row[it_i] = items_sum
             changed = True
 
         # 更新 items_detail 摘要
@@ -741,10 +733,10 @@ def create_order(order_no, order_date, customer_name, customer_phone,
             'order_no': order_no, 'order_date': str(order_date),
             'customer_name': customer_name, 'customer_phone': customer_phone,
             'customer_email': customer_email, 'shipping_address': shipping_address,
-            'status': "已確認", 'total_amount': float(items_total),
+            'status': "已確認", 'total_amount': float(total),
             'note': note, 'created_by': created_by, 'created_at': str(datetime.now()),
             'discount': float(discount), 'shipping_fee': float(shipping_fee),
-            'items_total': float(total),
+            'items_total': float(items_total),
             'birthday': str(birthday), 'lunar_birthday': str(lunar_birthday),
             'birth_time': str(birth_time),
             'items_detail': ", ".join([f"{it['product_name']} x{int(it['qty'])}" for it in items])
@@ -928,8 +920,8 @@ def recalc_order_total(order_no, discount=0, shipping_fee=0):
         [f"{row['product_name']} x{int(row['qty'])}" for _, row in items.iterrows()]
     ) if not items.empty else ""
     return update_order_fields(order_no, {
-        'items_total': float(total),
-        'total_amount': float(items_total),
+        'items_total': float(items_total),
+        'total_amount': float(total),
         'discount': float(discount),
         'shipping_fee': float(shipping_fee),
         'items_detail': items_summary
@@ -1737,7 +1729,7 @@ with st.sidebar:
         st.rerun()
     with st.expander("🔧 系統工具"):
         st.caption("⚠️ 請依序執行：先 ① 再 ②")
-        if st.button("① 📐 重整訂單欄位順序", help="重新排列欄位、移除重複中文欄位、交換 total_amount/items_total 值"):
+        if st.button("① 📐 重整訂單欄位順序", help="重新排列欄位順序、移除重複的中文欄位"):
             with st.spinner("重整欄位中..."):
                 ok, msg = reorganize_orders_columns()
             if ok:
@@ -1871,7 +1863,7 @@ elif page == "🚚 出貨作業":
                 order_labels_ship = (
                     shippable['order_no'].astype(str) + " | " +
                     shippable['customer_name'].astype(str) + " | $" +
-                    shippable['items_total'].astype(int).astype(str) + " | " +
+                    shippable['total_amount'].astype(int).astype(str) + " | " +
                     shippable['status'].astype(str)
                 ).tolist()
                 sel_ship_order = st.selectbox("選擇訂單", order_labels_ship, key="ship_order_sel")
@@ -1882,7 +1874,7 @@ elif page == "🚚 出貨作業":
                 si1, si2, si3 = st.columns(3)
                 si1.write(f"**客戶:** {sel_ship_row.get('customer_name', '')}")
                 si2.write(f"**地址:** {sel_ship_row.get('shipping_address', '')}")
-                si3.write(f"**總額:** ${sel_ship_row.get('items_total', 0):,.0f}")
+                si3.write(f"**總額:** ${sel_ship_row.get('total_amount', 0):,.0f}")
 
                 items_ship = load_order_items(sel_ship_ono)
                 df_cat_ship = load_wage_catalog()
@@ -2164,7 +2156,7 @@ elif page == "🛒 訂單管理":
                     ono = str(row.get('order_no', ''))
                     status = str(row.get('status', ''))
                     icon = ORDER_STATUS_COLORS.get(status, "⚪")
-                    with st.expander(f"{icon} {ono} | {row.get('customer_name', '')} | ${row.get('items_total', 0):,.0f} | {status}"):
+                    with st.expander(f"{icon} {ono} | {row.get('customer_name', '')} | ${row.get('total_amount', 0):,.0f} | {status}"):
                         dc1, dc2, dc3 = st.columns(3)
                         dc1.write(f"日期: {row.get('order_date', '')}")
                         dc2.write(f"電話: {row.get('customer_phone', '')}")
@@ -2183,9 +2175,9 @@ elif page == "🛒 訂單管理":
                                 render_numerology_table(o_bday, o_lbday, key_prefix=f"{kp}_{ono}")
                         r_disc = float(row.get('discount', 0))
                         r_ship = float(row.get('shipping_fee', 0))
-                        r_items = float(row.get('total_amount', 0))
+                        r_items = float(row.get('items_total', 0))
                         if r_disc > 0 or r_ship > 0:
-                            st.write(f"商品 ${r_items:,.0f} - 折扣 ${r_disc:,.0f} + 運費 ${r_ship:,.0f} = **${row.get('items_total', 0):,.0f}**")
+                            st.write(f"商品 ${r_items:,.0f} - 折扣 ${r_disc:,.0f} + 運費 ${r_ship:,.0f} = **${row.get('total_amount', 0):,.0f}**")
                         items = load_order_items(ono)
                         if not items.empty:
                             st.markdown("##### 訂單品項")
@@ -2383,12 +2375,12 @@ elif page == "🛒 訂單管理":
                 st.markdown(f"### {icon} 訂單 {sel_ono}")
                 mc1, mc2, mc3, mc4 = st.columns(4)
                 mc1.metric("狀態", status)
-                mc2.metric("應付總額", f"${row.get('items_total', 0):,.0f}")
+                mc2.metric("應付總額", f"${row.get('total_amount', 0):,.0f}")
                 mc3.metric("客戶", row.get('customer_name', ''))
                 mc4.metric("日期", row.get('order_date', ''))
                 d_disc = float(row.get('discount', 0))
                 d_ship = float(row.get('shipping_fee', 0))
-                d_items = float(row.get('total_amount', 0))
+                d_items = float(row.get('items_total', 0))
                 if d_disc > 0 or d_ship > 0:
                     dc1, dc2, dc3 = st.columns(3)
                     dc1.metric("商品小計", f"${d_items:,.0f}")
@@ -2819,12 +2811,12 @@ elif page == "📊 報表查詢":
                 (df_orders_rpt['order_date'].astype(str).str.startswith(profit_ym))
             ]
         order_count = len(completed)
-        # items_total = 應付總額（商品小計-折扣+運費），total_amount = 商品小計
-        total_revenue = float(completed['items_total'].sum()) if not completed.empty else 0.0
+        # total_amount = 應付總額，items_total = 商品小計
+        total_revenue = float(completed['total_amount'].sum()) if not completed.empty else 0.0
         shipping_income = float(completed['shipping_fee'].sum()) if not completed.empty else 0.0
         discount_total = float(completed['discount'].sum()) if not completed.empty else 0.0
-        order_items_total = float(completed['total_amount'].sum()) if not completed.empty else 0.0
-        # 若 total_amount（商品小計）為空但 items_total（應付總額）有值，反推商品收入
+        order_items_total = float(completed['items_total'].sum()) if not completed.empty else 0.0
+        # 若 items_total（商品小計）為空但 total_amount（應付總額）有值，反推商品收入
         if order_items_total == 0 and total_revenue > 0:
             order_items_total = total_revenue + discount_total - shipping_income
 
@@ -2893,13 +2885,13 @@ elif page == "📊 報表查詢":
                 st.info(f"{profit_ym} 沒有已完成的訂單")
             else:
                 st.markdown(f"共 **{order_count}** 筆已完成訂單")
-                disp_cols = ['order_no', 'order_date', 'customer_name', 'total_amount',
-                             'discount', 'shipping_fee', 'items_total']
+                disp_cols = ['order_no', 'order_date', 'customer_name', 'items_total',
+                             'discount', 'shipping_fee', 'total_amount']
                 disp_cols = [c for c in disp_cols if c in completed.columns]
                 disp_rename = {'order_no': '訂單號', 'order_date': '日期',
-                               'customer_name': '客戶', 'total_amount': '商品小計',
+                               'customer_name': '客戶', 'items_total': '商品小計',
                                'discount': '折扣', 'shipping_fee': '運費',
-                               'items_total': '應收總額'}
+                               'total_amount': '應收總額'}
                 st.dataframe(completed[disp_cols].rename(columns=disp_rename),
                              use_container_width=True, hide_index=True)
 
