@@ -2131,7 +2131,7 @@ elif page == "🛒 訂單管理":
             df_orders['order_date_parsed'] = pd.to_datetime(df_orders['order_date'], errors='coerce')
             valid_dates = df_orders['order_date_parsed'].dropna()
             if not valid_dates.empty:
-                all_months = valid_dates.dt.to_period('M').unique().sort_values(ascending=False)
+                all_months = sorted(valid_dates.dt.to_period('M').unique(), reverse=True)
                 month_options = ["全部月份"] + [str(m) for m in all_months]
             else:
                 month_options = ["全部月份"]
