@@ -477,6 +477,111 @@ def ensure_extra_columns():
     except Exception:
         pass
 
+# ── 會計科目 ──────────────────────────────────────────
+ACCT_INCOME_CATEGORIES = [
+    "服務收入", "利息收入", "租金收入", "佣金收入",
+    "補助／獎助金", "退稅收入", "資產處分利益",
+    "其他營業收入", "其他非營業收入",
+]
+ACCT_EXPENSE_CATEGORIES = [
+    "租金支出", "水電費", "電信／網路費", "交通費",
+    "郵電／運費", "文具／辦公用品", "包裝材料",
+    "廣告行銷費", "保險費", "稅捐", "手續費",
+    "修繕費", "折舊", "餐費", "交際費",
+    "設備購置", "軟體／訂閱費", "教育訓練費",
+    "清潔費", "雜費",
+]
+
+# ── OtherIncome / OtherExpense 共用 ──────────────────
+_OI_HEADER = ["id", "date", "category", "source", "amount", "note", "created_by", "created_at"]
+_OE_HEADER = ["id", "date", "category", "description", "amount", "note", "created_by", "created_at"]
+
+def _ensure_sheet(sheet_name, header):
+    """確保工作表存在，不存在則自動建立"""
+    client = get_fresh_client()
+    if not client:
+        return None
+    sh = client.open(SPREADSHEET_NAME)
+    try:
+        ws = sh.worksheet(sheet_name)
+    except Exception:
+        ws = sh.add_worksheet(title=sheet_name, rows=200, cols=len(header) + 2)
+        ws.update('A1', [header], value_input_option='RAW')
+    return ws
+
+def _load_sheet(sheet_name, header, year_month=None):
+    """通用讀取：載入工作表並按月份篩選"""
+    df = load_data(sheet_name)
+    if df.empty or 'date' not in df.columns:
+        return pd.DataFrame(columns=header)
+    # 相容舊版 OtherIncome（沒有 category 欄位）
+    if 'category' not in df.columns:
+        df['category'] = ""
+    if 'amount' in df.columns:
+        df['amount'] = pd.to_numeric(df['amount'], errors='coerce').fillna(0)
+    if year_month:
+        df = df[df['date'].astype(str).str.startswith(year_month)]
+    return df
+
+def _add_entry(sheet_name, header, row_data):
+    """通用新增一筆紀錄"""
+    import uuid, datetime as dt
+    _ensure_sheet(sheet_name, header)
+    ws = get_worksheet_for_write(sheet_name)
+    if not ws:
+        return False
+    entry_id = str(uuid.uuid4())[:8]
+    created_at = dt.datetime.now().isoformat()
+    full_row = [entry_id] + row_data + [created_at]
+    import time as _t
+    for _retry in range(3):
+        try:
+            ws.append_row(full_row)
+            break
+        except Exception as _e:
+            if '429' in str(_e) and _retry < 2:
+                _t.sleep(3 + _retry * 3)
+                continue
+            raise
+    clear_cache()
+    return True
+
+def _delete_entry(sheet_name, entry_id):
+    """通用刪除一筆紀錄"""
+    ws = get_worksheet_for_write(sheet_name)
+    if not ws:
+        return False
+    data = ws.get_all_values()
+    for i, row in enumerate(data[1:], start=2):
+        if row and row[0] == str(entry_id).strip():
+            ws.delete_rows(i)
+            clear_cache()
+            return True
+    return False
+
+# ── 其他收入 ──
+def load_other_income(year_month=None):
+    return _load_sheet("OtherIncome", _OI_HEADER, year_month)
+
+def add_other_income(date_str, category, source, amount, note="", created_by=""):
+    return _add_entry("OtherIncome", _OI_HEADER,
+                      [date_str, category, source, float(amount), note, created_by])
+
+def delete_other_income(entry_id):
+    return _delete_entry("OtherIncome", entry_id)
+
+# ── 其他支出 ──
+def load_other_expense(year_month=None):
+    return _load_sheet("OtherExpense", _OE_HEADER, year_month)
+
+def add_other_expense(date_str, category, description, amount, note="", created_by=""):
+    return _add_entry("OtherExpense", _OE_HEADER,
+                      [date_str, category, description, float(amount), note, created_by])
+
+def delete_other_expense(entry_id):
+    return _delete_entry("OtherExpense", entry_id)
+
+
 def generate_order_no():
     now = datetime.now()
     return f"ORD-{now.strftime('%Y%m%d')}-{int(time.time()) % 100000:05d}"
@@ -1523,11 +1628,15 @@ def _render_profit_report():
     if order_items_total == 0 and total_revenue > 0:
         order_items_total = total_revenue + discount_total - shipping_income
 
-    # ── 2. 工資支出 ──
+    # ── 2. 其他收入 ──
+    df_other_income = load_other_income(profit_ym)
+    other_income_total = float(df_other_income['amount'].sum()) if not df_other_income.empty else 0.0
+
+    # ── 3. 工資支出 ──
     df_wages_rpt = load_wage_entries(profit_ym)
     wage_total = float(df_wages_rpt['amount'].sum()) if not df_wages_rpt.empty else 0.0
 
-    # ── 3. 進貨成本 ──
+    # ── 4. 進貨成本 ──
     df_hist = load_data("History")
     purchase_cost = 0.0
     df_purchase_month = pd.DataFrame()
@@ -1541,35 +1650,63 @@ def _render_profit_report():
             if not df_purchase_month.empty and 'cost' in df_purchase_month.columns:
                 purchase_cost = float(pd.to_numeric(df_purchase_month['cost'], errors='coerce').fillna(0).sum())
 
-    # ── 4. 計算 ──
-    gross_profit = total_revenue - purchase_cost
-    net_profit = gross_profit - wage_total
-    margin_pct = (net_profit / total_revenue * 100) if total_revenue > 0 else 0
+    # ── 5. 其他支出 ──
+    df_other_expense = load_other_expense(profit_ym)
+    other_expense_total = float(df_other_expense['amount'].sum()) if not df_other_expense.empty else 0.0
+
+    # ── 6. 計算 ──
+    combined_revenue = total_revenue + other_income_total
+    total_cost = purchase_cost + wage_total + other_expense_total
+    gross_profit = combined_revenue - purchase_cost
+    net_profit = combined_revenue - total_cost
+    margin_pct = (net_profit / combined_revenue * 100) if combined_revenue > 0 else 0
 
     # ── 顯示 ──
     st.markdown(f"### 📈 {profit_ym} 損益表")
-    km1, km2, km3, km4 = st.columns(4)
-    km1.metric("💰 總收入", f"${total_revenue:,.0f}", f"{order_count} 筆訂單")
+    km1, km2, km3, km4, km5 = st.columns(5)
+    _rev_delta = f"{order_count} 筆訂單"
+    if other_income_total > 0:
+        _rev_delta += f" + 其他 ${other_income_total:,.0f}"
+    km1.metric("💰 總收入", f"${combined_revenue:,.0f}", _rev_delta)
     km2.metric("📦 進貨成本", f"${purchase_cost:,.0f}")
     km3.metric("👷 工資支出", f"${wage_total:,.0f}")
-    km4.metric("📈 淨利", f"${net_profit:,.0f}",
-               delta=f"淨利率 {margin_pct:.1f}%" if total_revenue > 0 else "無收入")
+    km4.metric("🔶 其他支出", f"${other_expense_total:,.0f}")
+    km5.metric("📈 淨利", f"${net_profit:,.0f}",
+               delta=f"淨利率 {margin_pct:.1f}%" if combined_revenue > 0 else "無收入")
 
     st.markdown("---")
     st.markdown("##### 📋 損益明細")
+
+    # ── 收入區塊 ──
     pnl_rows = [
         {"項目": "🟢 商品收入", "金額": f"${order_items_total:,.0f}"},
         {"項目": "🟢 運費收入", "金額": f"${shipping_income:,.0f}"},
     ]
     if discount_total > 0:
         pnl_rows.append({"項目": "🔴 折扣", "金額": f"-${discount_total:,.0f}"})
-    pnl_rows += [
-        {"項目": "──── 總收入 ────", "金額": f"**${total_revenue:,.0f}**"},
-        {"項目": "🔴 進貨成本", "金額": f"-${purchase_cost:,.0f}"},
-        {"項目": "──── 毛利 ────", "金額": f"**${gross_profit:,.0f}**"},
-        {"項目": "🔴 工資支出", "金額": f"-${wage_total:,.0f}"},
-        {"項目": "══ 淨利 ══", "金額": f"**${net_profit:,.0f}**"},
-    ]
+    pnl_rows.append({"項目": "──── 訂單收入 ────", "金額": f"**${total_revenue:,.0f}**"})
+    if other_income_total > 0 or not df_other_income.empty:
+        for _, oi_row in df_other_income.iterrows():
+            _cat = oi_row.get('category', '')
+            _src = oi_row.get('source', '其他')
+            _label = f"{_cat}：{_src}" if _cat else _src
+            pnl_rows.append({"項目": f"🟡 {_label}", "金額": f"${float(oi_row.get('amount', 0)):,.0f}"})
+        pnl_rows.append({"項目": "──── 其他收入小計 ────", "金額": f"**${other_income_total:,.0f}**"})
+    pnl_rows.append({"項目": "════ 總收入 ════", "金額": f"**${combined_revenue:,.0f}**"})
+
+    # ── 支出區塊 ──
+    pnl_rows.append({"項目": "🔴 進貨成本", "金額": f"-${purchase_cost:,.0f}"})
+    pnl_rows.append({"項目": "🔴 工資支出", "金額": f"-${wage_total:,.0f}"})
+    if other_expense_total > 0 or not df_other_expense.empty:
+        for _, oe_row in df_other_expense.iterrows():
+            _ecat = oe_row.get('category', '')
+            _edesc = oe_row.get('description', '')
+            _elabel = f"{_ecat}：{_edesc}" if _ecat and _edesc else (_ecat or _edesc or '其他')
+            pnl_rows.append({"項目": f"🔶 {_elabel}", "金額": f"-${float(oe_row.get('amount', 0)):,.0f}"})
+        pnl_rows.append({"項目": "──── 其他支出小計 ────", "金額": f"**-${other_expense_total:,.0f}**"})
+    pnl_rows.append({"項目": "════ 總支出 ════", "金額": f"**-${total_cost:,.0f}**"})
+    pnl_rows.append({"項目": "══ 淨利 ══", "金額": f"**${net_profit:,.0f}**"})
+
     pnl_md = "| 項目 | 金額 |\n|------|------:|\n"
     for r in pnl_rows:
         pnl_md += f"| {r['項目']} | {r['金額']} |\n"
@@ -1577,7 +1714,11 @@ def _render_profit_report():
 
     # ── 詳細分類 ──
     st.markdown("---")
-    bd1, bd2, bd3 = st.tabs(["📦 訂單明細", "👷 工資明細", "📥 進貨明細"])
+    bd1, bd2, bd3, bd4, bd5 = st.tabs([
+        "📦 訂單明細", "🟡 其他收入", "🔶 其他支出", "👷 工資明細", "📥 進貨明細"
+    ])
+
+    # ── tab: 訂單明細 ──
     with bd1:
         if completed.empty:
             st.info(f"{profit_ym} 沒有已完成的訂單")
@@ -1604,7 +1745,133 @@ def _render_profit_report():
                 ).reset_index().rename(columns={'product_name': '品名'})
                 prod_rank = prod_rank.sort_values('營收', ascending=False)
                 st.dataframe(prod_rank, use_container_width=True, hide_index=True)
+
+    # ── tab: 其他收入 ──
     with bd2:
+        st.markdown("##### ➕ 新增其他收入")
+        with st.form("add_other_income_form", clear_on_submit=True):
+            oi_r1c1, oi_r1c2, oi_r1c3 = st.columns([2, 2, 3])
+            oi_date = oi_r1c1.date_input("日期", value=date.today(), key="oi_date")
+            oi_cat = oi_r1c2.selectbox("會計科目", ACCT_INCOME_CATEGORIES, key="oi_cat")
+            oi_source = oi_r1c3.text_input("說明", placeholder="例：市集擺攤、講座鐘點費…", key="oi_source")
+            oi_r2c1, oi_r2c2 = st.columns(2)
+            oi_amount = oi_r2c1.number_input("金額", min_value=0.0, step=100.0, key="oi_amount")
+            oi_note = oi_r2c2.text_input("備註", placeholder="選填", key="oi_note")
+            oi_submit = st.form_submit_button("💾 新增收入", use_container_width=True)
+            if oi_submit:
+                if not oi_source or not oi_source.strip():
+                    st.error("請輸入說明")
+                elif oi_amount <= 0:
+                    st.error("金額必須大於 0")
+                else:
+                    ok = add_other_income(
+                        date_str=oi_date.strftime("%Y-%m-%d"),
+                        category=oi_cat,
+                        source=oi_source.strip(),
+                        amount=oi_amount,
+                        note=oi_note.strip(),
+                        created_by=st.session_state.get('current_user', '')
+                    )
+                    if ok:
+                        st.success(f"已新增：[{oi_cat}] {oi_source} ${oi_amount:,.0f}")
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error("新增失敗，請稍後再試")
+
+        st.markdown("---")
+        st.markdown(f"##### 📋 {profit_ym} 其他收入紀錄")
+        if df_other_income.empty:
+            st.info(f"{profit_ym} 沒有其他收入紀錄")
+        else:
+            st.markdown(f"共 **{len(df_other_income)}** 筆，小計 **${other_income_total:,.0f}**")
+            # 按科目分組摘要
+            if 'category' in df_other_income.columns:
+                _oi_by_cat = df_other_income.groupby('category')['amount'].sum()
+                if len(_oi_by_cat) > 1:
+                    for _cat_name, _cat_sum in _oi_by_cat.items():
+                        st.caption(f"📂 {_cat_name}　${float(_cat_sum):,.0f}")
+            st.markdown("")
+            for _oi_idx, _oi_row in df_other_income.iterrows():
+                _oi_id = str(_oi_row.get('id', ''))
+                _oi_cat = _oi_row.get('category', '')
+                _oi_src = _oi_row.get('source', '')
+                _oi_amt = float(_oi_row.get('amount', 0))
+                _oi_dt = str(_oi_row.get('date', ''))
+                _oi_nt = _oi_row.get('note', '')
+                _oi_cols = st.columns([2, 2, 3, 2, 1])
+                _oi_cols[0].write(f"📅 {_oi_dt}")
+                _oi_cols[1].write(f"`{_oi_cat}`" if _oi_cat else "")
+                _oi_cols[2].write(f"**{_oi_src}**" + (f"（{_oi_nt}）" if _oi_nt else ""))
+                _oi_cols[3].write(f"${_oi_amt:,.0f}")
+                if _oi_cols[4].button("🗑️", key=f"del_oi_{_oi_id}", help="刪除此筆"):
+                    delete_other_income(_oi_id)
+                    st.rerun()
+
+    # ── tab: 其他支出 ──
+    with bd3:
+        st.markdown("##### ➕ 新增其他支出")
+        with st.form("add_other_expense_form", clear_on_submit=True):
+            oe_r1c1, oe_r1c2, oe_r1c3 = st.columns([2, 2, 3])
+            oe_date = oe_r1c1.date_input("日期", value=date.today(), key="oe_date")
+            oe_cat = oe_r1c2.selectbox("會計科目", ACCT_EXPENSE_CATEGORIES, key="oe_cat")
+            oe_desc = oe_r1c3.text_input("說明", placeholder="例：辦公室月租、網路月費…", key="oe_desc")
+            oe_r2c1, oe_r2c2 = st.columns(2)
+            oe_amount = oe_r2c1.number_input("金額", min_value=0.0, step=100.0, key="oe_amount")
+            oe_note = oe_r2c2.text_input("備註", placeholder="選填", key="oe_note")
+            oe_submit = st.form_submit_button("💾 新增支出", use_container_width=True)
+            if oe_submit:
+                if not oe_desc or not oe_desc.strip():
+                    st.error("請輸入說明")
+                elif oe_amount <= 0:
+                    st.error("金額必須大於 0")
+                else:
+                    ok = add_other_expense(
+                        date_str=oe_date.strftime("%Y-%m-%d"),
+                        category=oe_cat,
+                        description=oe_desc.strip(),
+                        amount=oe_amount,
+                        note=oe_note.strip(),
+                        created_by=st.session_state.get('current_user', '')
+                    )
+                    if ok:
+                        st.success(f"已新增：[{oe_cat}] {oe_desc} ${oe_amount:,.0f}")
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error("新增失敗，請稍後再試")
+
+        st.markdown("---")
+        st.markdown(f"##### 📋 {profit_ym} 其他支出紀錄")
+        if df_other_expense.empty:
+            st.info(f"{profit_ym} 沒有其他支出紀錄")
+        else:
+            st.markdown(f"共 **{len(df_other_expense)}** 筆，小計 **${other_expense_total:,.0f}**")
+            # 按科目分組摘要
+            if 'category' in df_other_expense.columns:
+                _oe_by_cat = df_other_expense.groupby('category')['amount'].sum()
+                if len(_oe_by_cat) > 1:
+                    for _cat_name, _cat_sum in _oe_by_cat.items():
+                        st.caption(f"📂 {_cat_name}　${float(_cat_sum):,.0f}")
+            st.markdown("")
+            for _oe_idx, _oe_row in df_other_expense.iterrows():
+                _oe_id = str(_oe_row.get('id', ''))
+                _oe_cat = _oe_row.get('category', '')
+                _oe_dsc = _oe_row.get('description', '')
+                _oe_amt = float(_oe_row.get('amount', 0))
+                _oe_dt = str(_oe_row.get('date', ''))
+                _oe_nt = _oe_row.get('note', '')
+                _oe_cols = st.columns([2, 2, 3, 2, 1])
+                _oe_cols[0].write(f"📅 {_oe_dt}")
+                _oe_cols[1].write(f"`{_oe_cat}`" if _oe_cat else "")
+                _oe_cols[2].write(f"**{_oe_dsc}**" + (f"（{_oe_nt}）" if _oe_nt else ""))
+                _oe_cols[3].write(f"${_oe_amt:,.0f}")
+                if _oe_cols[4].button("🗑️", key=f"del_oe_{_oe_id}", help="刪除此筆"):
+                    delete_other_expense(_oe_id)
+                    st.rerun()
+
+    # ── tab: 工資明細 ──
+    with bd4:
         if df_wages_rpt.empty:
             st.info(f"{profit_ym} 沒有工資紀錄")
         else:
@@ -1629,7 +1896,9 @@ def _render_profit_report():
                         'amount': '金額', 'note': '備註'}
             st.dataframe(df_wages_rpt[w_cols].rename(columns=w_rename),
                          use_container_width=True, hide_index=True)
-    with bd3:
+
+    # ── tab: 進貨明細 ──
+    with bd5:
         if df_purchase_month.empty:
             st.info(f"{profit_ym} 沒有進貨紀錄")
         else:
@@ -1640,17 +1909,23 @@ def _render_profit_report():
                         'qty': '數量', 'cost': '成本', 'warehouse': '倉庫', 'user': '經手人'}
             st.dataframe(df_purchase_month[p_cols].rename(columns=p_rename),
                          use_container_width=True, hide_index=True)
+
+    # ── 匯出 CSV ──
     st.markdown("---")
-    export_data = pd.DataFrame([
+    export_rows = [
         {"項目": "商品收入", "金額": order_items_total},
         {"項目": "運費收入", "金額": shipping_income},
         {"項目": "折扣", "金額": -discount_total},
-        {"項目": "總收入", "金額": total_revenue},
+        {"項目": "訂單收入小計", "金額": total_revenue},
+        {"項目": "其他收入", "金額": other_income_total},
+        {"項目": "總收入", "金額": combined_revenue},
         {"項目": "進貨成本", "金額": -purchase_cost},
-        {"項目": "毛利", "金額": gross_profit},
         {"項目": "工資支出", "金額": -wage_total},
+        {"項目": "其他支出", "金額": -other_expense_total},
+        {"項目": "總支出", "金額": -total_cost},
         {"項目": "淨利", "金額": net_profit},
-    ])
+    ]
+    export_data = pd.DataFrame(export_rows)
     st.download_button("⬇️ 匯出損益表 CSV",
                        export_data.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig'),
                        f"損益表_{profit_ym}.csv", "text/csv")
