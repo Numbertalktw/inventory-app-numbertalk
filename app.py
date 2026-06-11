@@ -3094,10 +3094,13 @@ elif page == "🔨 製造作業":
                 st.session_state['m_in_list'] = []; st.success("OK"); time.sleep(1); st.rerun()
     with t2:
         with st.form("m2_form"):
-            sel_out = st.selectbox("成品", prods['label']); wh_out = st.selectbox("倉庫", WAREHOUSES); qty_out = st.number_input("數量", 1.0)
+            sel_out = st.selectbox("成品", prods['label']); wh_out = st.selectbox("倉庫", WAREHOUSES)
+            mfg_c1, mfg_c2 = st.columns(2)
+            qty_out = mfg_c1.number_input("數量", 1.0)
+            mfg_user = mfg_c2.selectbox("入庫人員", KEYERS)
             if st.form_submit_button("完工確認"):
                 _mfg_sku = sel_out.split(" | ")[0]
-                if add_transaction("製造入庫", date.today(), _mfg_sku, wh_out, qty_out, "工廠", ""):
+                if add_transaction("製造入庫", date.today(), _mfg_sku, wh_out, qty_out, mfg_user, ""):
                     st.success("完工入庫成功！")
                 else:
                     st.error("❌ 入庫失敗，請檢查連線")
