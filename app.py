@@ -295,23 +295,138 @@ def get_formatted_product_df():
     return df
 
 def update_stock_qty(sku, warehouse, delta_qty):
-    ws = get_worksheet_for_write("Stock")
-    if not ws: return
-    try:
-        all_vals = ws.get_all_values()
-        header = all_vals[0]
-        sku_idx, wh_idx, qty_idx = header.index("sku"), header.index("warehouse"), header.index("qty")
-        row_idx = -1
-        for i, row in enumerate(all_vals[1:], 2):
-            if str(row[sku_idx]) == str(sku) and str(row[wh_idx]) == str(warehouse):
-                row_idx = i
-                current_val = float(row[qty_idx]) if row[qty_idx] else 0.0
-                break
-        if row_idx > 0:
-            ws.update_cell(row_idx, qty_idx + 1, current_val + delta_qty)
-        else:
-            ws.append_row([str(sku), warehouse, delta_qty])
-    except: pass
+    import time as _t
+    new_qty = None
+    # ── 1. 更新 Stock 工作表 ──
+    for _retry in range(3):
+        ws = get_worksheet_for_write("Stock")
+        if not ws:
+            return
+        try:
+            all_vals = ws.get_all_values()
+            header = all_vals[0]
+            sku_idx, wh_idx, qty_idx = header.index("sku"), header.index("warehouse"), header.index("qty")
+            row_idx = -1
+            for i, row in enumerate(all_vals[1:], 2):
+                if str(row[sku_idx]).strip() == str(sku).strip() and str(row[wh_idx]).strip() == str(warehouse).strip():
+                    row_idx = i
+                    current_val = float(row[qty_idx]) if row[qty_idx] else 0.0
+                    break
+            if row_idx > 0:
+                new_qty = current_val + delta_qty
+                ws.update_cell(row_idx, qty_idx + 1, new_qty)
+            else:
+                new_qty = delta_qty
+                ws.append_row([str(sku), warehouse, new_qty])
+            break
+        except Exception as _e:
+            if '429' in str(_e) and _retry < 2:
+                _t.sleep(3 + _retry * 3)
+                continue
+            st.warning(f"庫存更新失敗 ({sku} / {warehouse}): {_e}")
+            return
+    # ── 2. 同步更新 Products 工作表的庫存欄位 ──
+    _sync_product_stock(sku, warehouse, new_qty)
+
+def _sync_product_stock(sku, warehouse, new_qty):
+    """把庫存數字同步回 Products 工作表，讓 Google Sheets 直接顯示"""
+    if new_qty is None:
+        return
+    import time as _t
+    for _retry in range(3):
+        try:
+            ws_prod = get_worksheet_for_write("Products")
+            if not ws_prod:
+                return
+            _ensure_product_stock_columns(ws_prod)
+            p_header = ws_prod.row_values(1)
+            if 'sku' not in p_header or warehouse not in p_header:
+                return
+            sku_ci = p_header.index('sku')
+            wh_ci = p_header.index(warehouse)
+            p_all = ws_prod.get_all_values()
+            for ri, row in enumerate(p_all[1:], 2):
+                if str(row[sku_ci]).strip() == str(sku).strip():
+                    ws_prod.update_cell(ri, wh_ci + 1, new_qty)
+                    # 更新總庫存
+                    if '總庫存' in p_header:
+                        total_ci = p_header.index('總庫存')
+                        wh_sum = 0.0
+                        for wh_name in WAREHOUSES:
+                            if wh_name in p_header:
+                                wi = p_header.index(wh_name)
+                                if wh_name == warehouse:
+                                    wh_sum += float(new_qty)
+                                else:
+                                    cell_val = row[wi] if wi < len(row) else 0
+                                    try:
+                                        wh_sum += float(cell_val) if cell_val else 0.0
+                                    except (ValueError, TypeError):
+                                        pass
+                        ws_prod.update_cell(ri, total_ci + 1, wh_sum)
+                    break
+            return
+        except Exception as _e:
+            if '429' in str(_e) and _retry < 2:
+                _t.sleep(3 + _retry * 3)
+                continue
+            return
+
+def sync_all_stock_to_products():
+    """從 Stock 工作表一次性同步所有庫存到 Products 工作表"""
+    ws_prod = get_worksheet_for_write("Products")
+    ws_stock = get_worksheet_for_write("Stock")
+    if not ws_prod or not ws_stock:
+        return False, "無法開啟工作表"
+    _ensure_product_stock_columns(ws_prod)
+    p_header = ws_prod.row_values(1)
+    p_all = ws_prod.get_all_values()
+    s_all = ws_stock.get_all_values()
+    if not s_all or len(s_all) < 2:
+        return False, "Stock 工作表無資料"
+    s_header = s_all[0]
+    s_sku_i = s_header.index("sku")
+    s_wh_i = s_header.index("warehouse")
+    s_qty_i = s_header.index("qty")
+    # 建立 sku → {warehouse: qty} 對照表
+    stock_map = {}
+    for sr in s_all[1:]:
+        s_sku = str(sr[s_sku_i]).strip()
+        s_wh = str(sr[s_wh_i]).strip()
+        try:
+            s_qty = float(sr[s_qty_i]) if sr[s_qty_i] else 0.0
+        except (ValueError, TypeError):
+            s_qty = 0.0
+        stock_map.setdefault(s_sku, {})[s_wh] = stock_map.get(s_sku, {}).get(s_wh, 0.0) + s_qty
+    # 批次更新 Products
+    p_sku_i = p_header.index('sku')
+    total_ci = p_header.index('總庫存') if '總庫存' in p_header else None
+    wh_cols = {}
+    for wh in WAREHOUSES:
+        if wh in p_header:
+            wh_cols[wh] = p_header.index(wh)
+    updated = 0
+    batch_updates = []
+    for ri, row in enumerate(p_all[1:], 2):
+        sku = str(row[p_sku_i]).strip()
+        if not sku:
+            continue
+        sku_stock = stock_map.get(sku, {})
+        wh_sum = 0.0
+        for wh_name, col_idx in wh_cols.items():
+            qty = sku_stock.get(wh_name, 0.0)
+            wh_sum += qty
+            col_letter = chr(65 + col_idx) if col_idx < 26 else chr(64 + col_idx // 26) + chr(65 + col_idx % 26)
+            batch_updates.append({'range': f'{col_letter}{ri}', 'values': [[qty]]})
+        if total_ci is not None:
+            col_letter = chr(65 + total_ci) if total_ci < 26 else chr(64 + total_ci // 26) + chr(65 + total_ci % 26)
+            batch_updates.append({'range': f'{col_letter}{ri}', 'values': [[wh_sum]]})
+        if sku_stock:
+            updated += 1
+    if batch_updates:
+        ws_prod.batch_update(batch_updates, value_input_option='RAW')
+    clear_cache()
+    return True, f"已同步 {updated} 項商品的庫存"
 
 def add_transaction(doc_type, date_str, sku, wh, qty, user, note, ship_method="", ship_no="", cost=0):
     ws_hist = get_worksheet_for_write("History")
@@ -325,16 +440,23 @@ def add_transaction(doc_type, date_str, sku, wh, qty, user, note, ship_method=""
 
     prefix = {"進貨":"IN", "銷售出貨":"OUT", "製造領料":"MO", "製造入庫":"PD", "移庫(撥出)":"TR-O", "移庫(撥入)":"TR-I"}.get(doc_type, "ADJ")
     doc_no = f"{prefix}-{int(time.time())}"
-    try:
-        ws_hist.append_row([
-            doc_type, doc_no, str(date_str), str(sku), wh, float(qty),
-            user, note, float(cost), str(datetime.now()), p_name, ship_method, ship_no
-        ])
-        factor = -1 if doc_type in ['銷售出貨', '製造領料', '移庫(撥出)'] else 1
-        update_stock_qty(sku, wh, float(qty) * factor)
-        clear_cache()
-        return True
-    except: return False
+    import time as _t
+    for _retry in range(3):
+        try:
+            ws_hist.append_row([
+                doc_type, doc_no, str(date_str), str(sku), wh, float(qty),
+                user, note, float(cost), str(datetime.now()), p_name, ship_method, ship_no
+            ])
+            break
+        except Exception as _e:
+            if '429' in str(_e) and _retry < 2:
+                _t.sleep(3 + _retry * 3)
+                continue
+            return False
+    factor = -1 if doc_type in ['銷售出貨', '製造領料', '移庫(撥出)'] else 1
+    update_stock_qty(sku, wh, float(qty) * factor)
+    clear_cache()
+    return True
 
 def delete_transaction(doc_no):
     ws_hist = get_worksheet_for_write("History")
@@ -363,12 +485,27 @@ def generate_auto_sku(series, category, existing_skus_set):
         count += 1
         if count > 999: return f"{prefix}-{int(time.time())}"
 
+def _ensure_product_stock_columns(ws):
+    """確保 Products 工作表有 總庫存 和各倉庫欄位"""
+    header = ws.row_values(1)
+    stock_cols = ['總庫存'] + WAREHOUSES
+    missing = [c for c in stock_cols if c not in header]
+    if not missing:
+        return
+    needed_total = len(header) + len(missing)
+    if ws.col_count < needed_total:
+        ws.resize(cols=needed_total + 2)
+    for col_name in missing:
+        ws.update_cell(1, len(header) + 1, col_name)
+        header.append(col_name)
+
 def add_product(sku, name, category, series, spec, note, color, price=0):
     ensure_price_column()
     ws = get_worksheet_for_write("Products")
     if not ws:
         return False, "連線錯誤"
     try:
+        _ensure_product_stock_columns(ws)
         header = ws.row_values(1)
         row_data = [''] * len(header)
         col_map = {h: i for i, h in enumerate(header)}
@@ -377,6 +514,10 @@ def add_product(sku, name, category, series, spec, note, color, price=0):
                          ('note', note), ('price', float(price))]:
             if key in col_map:
                 row_data[col_map[key]] = val
+        # 初始化庫存欄位為 0
+        for sc in ['總庫存'] + WAREHOUSES:
+            if sc in col_map:
+                row_data[col_map[sc]] = 0
         ws.append_row(row_data)
         ws_stock = get_worksheet_for_write("Stock")
         if ws_stock:
@@ -1937,6 +2078,15 @@ with st.sidebar:
     if st.button("刷新資料"):
         clear_cache()
         st.rerun()
+    if st.button("🔄 同步庫存到後台", help="將 Stock 工作表的庫存數據同步到 Products 工作表"):
+        with st.spinner("同步中..."):
+            ok, msg = sync_all_stock_to_products()
+        if ok:
+            st.success(msg)
+        else:
+            st.error(msg)
+        time.sleep(1)
+        st.rerun()
 
 # --- 📦 商品管理 ---
 if page == "📦 商品管理":
@@ -2946,8 +3096,12 @@ elif page == "🔨 製造作業":
         with st.form("m2_form"):
             sel_out = st.selectbox("成品", prods['label']); wh_out = st.selectbox("倉庫", WAREHOUSES); qty_out = st.number_input("數量", 1.0)
             if st.form_submit_button("完工確認"):
-                add_transaction("製造入庫", date.today(), sel_out.split(" | ")[0], wh_out, qty_out, "工廠", "")
-                st.success("OK"); time.sleep(1); st.rerun()
+                _mfg_sku = sel_out.split(" | ")[0]
+                if add_transaction("製造入庫", date.today(), _mfg_sku, wh_out, qty_out, "工廠", ""):
+                    st.success("完工入庫成功！")
+                else:
+                    st.error("❌ 入庫失敗，請檢查連線")
+                time.sleep(1); st.rerun()
     with t3:
         st.info("拆解：扣成品，回原料。")
         c1, c2 = st.columns(2)
