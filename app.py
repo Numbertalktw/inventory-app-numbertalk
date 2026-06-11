@@ -428,6 +428,36 @@ def sync_all_stock_to_products():
     clear_cache()
     return True, f"已同步 {updated} 項商品的庫存"
 
+def set_stock_qty(sku, warehouse, new_qty):
+    """庫存校正：直接設定某商品在某倉庫的庫存數量"""
+    import time as _t
+    for _retry in range(3):
+        ws = get_worksheet_for_write("Stock")
+        if not ws:
+            return False, "無法連線 Stock 工作表"
+        try:
+            all_vals = ws.get_all_values()
+            header = all_vals[0]
+            sku_idx = header.index("sku")
+            wh_idx = header.index("warehouse")
+            qty_idx = header.index("qty")
+            for i, row in enumerate(all_vals[1:], 2):
+                if str(row[sku_idx]).strip() == str(sku).strip() and str(row[wh_idx]).strip() == str(warehouse).strip():
+                    ws.update_cell(i, qty_idx + 1, float(new_qty))
+                    _sync_product_stock(sku, warehouse, float(new_qty))
+                    clear_cache()
+                    return True, f"{sku} 在 {warehouse} 庫存已設為 {new_qty}"
+            ws.append_row([str(sku), warehouse, float(new_qty)])
+            _sync_product_stock(sku, warehouse, float(new_qty))
+            clear_cache()
+            return True, f"{sku} 在 {warehouse} 庫存已設為 {new_qty}"
+        except Exception as _e:
+            if '429' in str(_e) and _retry < 2:
+                _t.sleep(3 + _retry * 3)
+                continue
+            return False, f"更新失敗: {_e}"
+    return False, "重試次數已達上限"
+
 def add_transaction(doc_type, date_str, sku, wh, qty, user, note, ship_method="", ship_no="", cost=0):
     ws_hist = get_worksheet_for_write("History")
     if not ws_hist:
@@ -2091,7 +2121,7 @@ with st.sidebar:
 # --- 📦 商品管理 ---
 if page == "📦 商品管理":
     st.subheader("📦 商品資料維護")
-    t1, t2 = st.tabs(["新增商品", "修改商品"])
+    t1, t2, t3_stock = st.tabs(["新增商品", "修改商品", "庫存校正"])
     with t1:
         current_df = load_data("Products")
         existing_cats = sorted(list(set(current_df['category'].tolist()))) if not current_df.empty else []
@@ -2135,6 +2165,50 @@ if page == "📦 商品管理":
                         if update_product(sku_s, {'name': n_n, 'spec': n_s, 'color': n_c, 'note': n_nt, 'price': n_p}):
                             st.success("更新成功"); time.sleep(1); st.rerun()
         else: st.warning("資料庫為空，請先新增商品。")
+    with t3_stock:
+        st.markdown("##### 🔧 庫存校正")
+        st.caption("直接設定商品在各倉庫的正確庫存數量（覆蓋現有數值）")
+        df_adj = get_formatted_product_df()
+        if not df_adj.empty and 'label' in df_adj.columns:
+            adj_sel = st.selectbox("選擇商品", df_adj['label'].tolist(), key="adj_prod")
+            adj_sku = adj_sel.split(" | ")[0]
+            df_stock_adj = load_data("Stock")
+            st.markdown("##### 目前庫存")
+            cur_stock = {}
+            if not df_stock_adj.empty:
+                for wh in WAREHOUSES:
+                    match = df_stock_adj[(df_stock_adj['sku'].astype(str) == adj_sku) & (df_stock_adj['warehouse'].astype(str) == wh)]
+                    cur_stock[wh] = float(match.iloc[0]['qty']) if not match.empty else 0.0
+            else:
+                for wh in WAREHOUSES:
+                    cur_stock[wh] = 0.0
+            cur_total = sum(cur_stock.values())
+            st.info(f"**總庫存: {cur_total:.0f}**　｜　" + "　".join([f"{wh}: {cur_stock[wh]:.0f}" for wh in WAREHOUSES]))
+            st.markdown("##### 設定新庫存")
+            with st.form("adj_form"):
+                adj_cols = st.columns(len(WAREHOUSES))
+                new_vals = {}
+                for i, wh in enumerate(WAREHOUSES):
+                    new_vals[wh] = adj_cols[i].number_input(wh, value=cur_stock[wh], step=1.0, key=f"adj_{wh}")
+                new_total = sum(new_vals.values())
+                st.markdown(f"**校正後總庫存: {new_total:.0f}**")
+                if st.form_submit_button("✅ 確認校正", use_container_width=True):
+                    success_count = 0
+                    for wh, new_q in new_vals.items():
+                        if new_q != cur_stock[wh]:
+                            ok, msg = set_stock_qty(adj_sku, wh, new_q)
+                            if ok:
+                                success_count += 1
+                            else:
+                                st.error(msg)
+                    if success_count > 0:
+                        st.success(f"✅ 已校正 {success_count} 個倉庫的庫存")
+                    else:
+                        st.info("庫存數量沒有變更")
+                    time.sleep(1)
+                    st.rerun()
+        else:
+            st.warning("無商品資料")
 
 # --- 📦 移庫作業 ---
 elif page == "📦 移庫作業":
