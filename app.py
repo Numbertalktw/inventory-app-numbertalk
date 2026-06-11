@@ -2963,6 +2963,9 @@ elif page == "🔨 製造作業":
     st.subheader("🔨 生產與拆解管理")
     if 'm_in_list' not in st.session_state: st.session_state['m_in_list'] = []
     prods = get_formatted_product_df()
+    if prods.empty or 'label' not in prods.columns:
+        st.warning("⚠️ 無法載入商品資料，請稍後重試或點「刷新資料」")
+        st.stop()
     t_order_mfg, t1, t2, t3 = st.tabs(["📋 訂單製造", "領料清單", "完工入庫", "產品拆解"])
 
     # ── 訂單製造（新功能）──────────────────────────────────────
