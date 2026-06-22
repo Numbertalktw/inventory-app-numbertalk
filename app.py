@@ -1423,6 +1423,60 @@ def _is_duplicate_wage(order_no, stage, item):
     return False
 
 
+def find_duplicate_wage_groups():
+    """掃描 WageEntries 找出所有重複工資群組(同訂單 + 同階段 + 模糊比對品項相同)。
+    回傳: [{'order_no', 'stage', 'keep': entry_dict, 'delete': [entry_dict,...]}, ...]
+    每一組保留 created_at 最早的一筆,其餘標記為待刪除。"""
+    df = load_wage_entries()
+    if df.empty or 'note' not in df.columns:
+        return []
+    # 依 (order_no, stage) 群組
+    grouped = {}
+    for _, r in df.iterrows():
+        ono = _extract_order_no(r.get('note', ''))
+        if not ono:
+            continue
+        key = (ono, str(r.get('stage', '')))
+        entry = {
+            'id': str(r.get('id', '')),
+            'item': str(r.get('item', '')),
+            'employee_name': str(r.get('employee_name', '')),
+            'amount': float(r.get('amount', 0) or 0),
+            'date': str(r.get('date', '')),
+            'note': str(r.get('note', '')),
+            'created_at': str(r.get('created_at', '')),
+        }
+        grouped.setdefault(key, []).append(entry)
+    # 找出每組裡品項模糊相同的子群組
+    duplicates = []
+    for (ono, stage), entries in grouped.items():
+        if len(entries) < 2:
+            continue
+        used = set()
+        for i, e1 in enumerate(entries):
+            if i in used:
+                continue
+            cluster = [i]
+            for j in range(i + 1, len(entries)):
+                if j in used:
+                    continue
+                if _items_equal_fuzzy(e1['item'], entries[j]['item']):
+                    cluster.append(j)
+            if len(cluster) >= 2:
+                # 依 created_at 排序,最早的保留
+                cluster_sorted = sorted(cluster, key=lambda idx: entries[idx]['created_at'])
+                keep_idx = cluster_sorted[0]
+                del_idxs = cluster_sorted[1:]
+                used.update(cluster)
+                duplicates.append({
+                    'order_no': ono,
+                    'stage': stage,
+                    'keep': entries[keep_idx],
+                    'delete': [entries[d] for d in del_idxs],
+                })
+    return duplicates
+
+
 def add_wage_entry(date_str, employee_name, category, stage, item, qty, price, amount, note, created_by="", skip_duplicate=True):
     """寫入一筆工資紀錄。skip_duplicate=True 時自動偵測並跳過同一訂單同階段同品項的重複紀錄。"""
     import uuid, datetime as dt
@@ -3389,6 +3443,55 @@ elif page == "💰 工資管理":
                             st.success(f"✅ 已刪除 {_deleted} 筆工資紀錄")
                             time.sleep(1.2)
                             st.rerun()
+
+        # ── 一鍵掃描並清理現有重複工資 ───────────────────────────────
+        with st.expander("🔍 一鍵掃描並清理現有重複工資（修舊資料用）"):
+            st.caption("掃描整個 WageEntries 找出同一訂單 + 同階段 + 同商品(模糊比對)的重複群組,"
+                       "保留最早建立的一筆,其餘標記為待刪除。預覽確認後再按清理。")
+            sc1, sc2 = st.columns([1, 3])
+            if sc1.button("🔍 掃描重複", key="wage_dup_scan_btn"):
+                st.session_state['_wage_dup_groups'] = find_duplicate_wage_groups()
+            if '_wage_dup_groups' in st.session_state:
+                dups = st.session_state['_wage_dup_groups']
+                if not dups:
+                    st.success("✓ 沒有發現重複的工資紀錄")
+                else:
+                    _total_del = sum(len(d['delete']) for d in dups)
+                    st.warning(
+                        f"⚠️ 發現 **{len(dups)}** 個重複群組,合計需刪除 **{_total_del}** 筆"
+                    )
+                    for di, d in enumerate(dups):
+                        st.markdown(f"##### 群組 {di + 1}: 訂單 `{d['order_no']}` · 階段 **{d['stage']}**")
+                        k = d['keep']
+                        st.markdown(
+                            f"✅ **保留** | {k['date']} | {k['employee_name']} | "
+                            f"{k['item']} | NT$ {k['amount']:,.0f} | "
+                            f"建立於 {k['created_at'][:19]}"
+                        )
+                        for x in d['delete']:
+                            st.markdown(
+                                f"❌ 刪除 | {x['date']} | {x['employee_name']} | "
+                                f"{x['item']} | NT$ {x['amount']:,.0f} | "
+                                f"建立於 {x['created_at'][:19]}"
+                            )
+                        st.divider()
+                    _scan_confirm = st.checkbox(
+                        "我確認要執行清理(保留每組最早一筆,刪除其餘)",
+                        key="wage_dup_scan_confirm"
+                    )
+                    if st.button("🗑️ 一鍵清理所有重複",
+                                  type="primary",
+                                  disabled=(not _scan_confirm),
+                                  key="wage_dup_clean_btn"):
+                        _cleaned = 0
+                        for d in dups:
+                            for x in d['delete']:
+                                if x['id'] and delete_wage_entry(x['id']):
+                                    _cleaned += 1
+                        st.success(f"✅ 已清理 {_cleaned} 筆重複的工資紀錄")
+                        del st.session_state['_wage_dup_groups']
+                        time.sleep(1.5)
+                        st.rerun()
 
     # ── 月度報表 ──────────────────────────────────────────────────
     with tab_report:
