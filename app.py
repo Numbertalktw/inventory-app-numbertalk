@@ -1536,11 +1536,31 @@ def mark_wage_entry_paid(entry_id, paid=True):
     return False
 
 def delete_wage_entry(entry_id):
+    # 空 ID 直接回傳,避免無謂的呼叫
+    if not entry_id:
+        return False
     ws = get_worksheet_for_write("WageEntries")
-    data = ws.get_all_values()
+    if not ws:
+        return False
+    try:
+        data = ws.get_all_values()
+    except Exception:
+        return False
+    if not data:
+        return False
+    # 依欄位名稱找到 id 欄位位置 (相容 'id' 或 'entry_id')
+    header = data[0]
+    id_col = 0
+    for i, h in enumerate(header):
+        if str(h).strip().lower() in ('id', 'entry_id'):
+            id_col = i
+            break
     for i, row in enumerate(data[1:], start=2):
-        if row and row[0] == entry_id:
-            ws.delete_rows(i)
+        if row and len(row) > id_col and row[id_col] == entry_id:
+            try:
+                ws.delete_rows(i)
+            except Exception:
+                return False
             clear_cache()
             return True
     return False
@@ -1548,23 +1568,42 @@ def delete_wage_entry(entry_id):
 def save_wage_employee(name, mult_prod=1):
     import uuid
     ws = get_worksheet_for_write("WageEmployees")
-    data = ws.get_all_values()
+    if not ws:
+        return False
+    try:
+        data = ws.get_all_values()
+    except Exception:
+        return False
     for i, row in enumerate(data[1:], start=2):
-        if row and row[1] == name:
-            ws.update(f"C{i}", [[mult_prod]])
+        if row and len(row) > 1 and row[1] == name:
+            try:
+                ws.update(f"C{i}", [[mult_prod]])
+            except Exception:
+                return False
             clear_cache()
             return True
     emp_id = str(uuid.uuid4())[:8]
-    ws.append_row([emp_id, name, mult_prod])
+    try:
+        ws.append_row([emp_id, name, mult_prod])
+    except Exception:
+        return False
     clear_cache()
     return True
 
 def delete_wage_employee(name):
     ws = get_worksheet_for_write("WageEmployees")
-    data = ws.get_all_values()
+    if not ws:
+        return False
+    try:
+        data = ws.get_all_values()
+    except Exception:
+        return False
     for i, row in enumerate(data[1:], start=2):
-        if row and row[1] == name:
-            ws.delete_rows(i)
+        if row and len(row) > 1 and row[1] == name:
+            try:
+                ws.delete_rows(i)
+            except Exception:
+                return False
             clear_cache()
             return True
     return False
