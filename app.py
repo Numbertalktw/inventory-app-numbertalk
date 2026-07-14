@@ -10,7 +10,7 @@ import time
 # ==========================================
 PAGE_TITLE = "numbertalk 雲端庫存系統"
 SPREADSHEET_NAME = "numbertalk-system"
-APP_VERSION = "2026-07-14 領料追蹤版 v5"
+APP_VERSION = "2026-07-14 領料追蹤版 v6"
 
 WAREHOUSES = ["Wen", "千畇", "James", "Imeng"]
 CATEGORIES = ["天然石", "金屬配件", "線材", "包裝材料", "完成品", "數字珠", "數字串", "香料", "手作設備"]
@@ -3566,12 +3566,22 @@ elif page == "🔨 製造作業":
             mfg_date = mfg_c2.date_input("製造日期", value=date.today())
             mfg_user = mfg_c3.selectbox("入庫人員", KEYERS)
             batch_no_preview = generate_batch_no(_mfg_sku_preview, mfg_date, _mfg_name_preview)
-            batch_no_input = st.text_input(
+            manual_batch_no = st.checkbox("手動輸入批號", value=False, key="manual_mfg_batch_no")
+            st.text_input(
                 "批號",
                 value=batch_no_preview,
-                key=f"batch_no_{_mfg_sku_preview}_{str(mfg_date)}",
-                help="系統會自動產生批號；如需沿用外部批號，也可以手動修改。"
+                disabled=True,
+                key=f"auto_batch_no_{_mfg_sku_preview}_{_batch_name_code(_mfg_name_preview)}_{str(mfg_date)}",
+                help="系統會依目前成品與製造日期自動產生批號。"
             )
+            batch_no_input = ""
+            if manual_batch_no:
+                batch_no_input = st.text_input(
+                    "手動批號",
+                    value=batch_no_preview,
+                    key=f"manual_batch_no_{_mfg_sku_preview}_{_batch_name_code(_mfg_name_preview)}_{str(mfg_date)}",
+                    help="只有需要沿用外部批號時才填寫；否則請使用系統自動批號。"
+                )
 
             df_cat_roles = load_wage_catalog()
             role_defaults = {"empMake": "", "empPack": "", "empShip": "", "empSvc": ""}
@@ -3593,7 +3603,12 @@ elif page == "🔨 製造作業":
             batch_note = st.text_input("批次備註", value="")
             if st.form_submit_button("完工確認"):
                 _mfg_sku = _mfg_sku_preview
-                batch_no = batch_no_input.strip() or generate_batch_no(_mfg_sku, mfg_date, _mfg_name_preview)
+                batch_no = batch_no_input.strip() if manual_batch_no and batch_no_input.strip() else generate_batch_no(_mfg_sku, mfg_date, _mfg_name_preview)
+                expected_sku_part = "".join(ch for ch in str(_mfg_sku) if ch.isalnum())[-8:]
+                expected_date_part = str(mfg_date).replace("-", "")[:8]
+                if manual_batch_no and (expected_sku_part not in batch_no or expected_date_part not in batch_no):
+                    st.error(f"手動批號需包含目前成品代碼 {expected_sku_part} 與製造日期 {expected_date_part}")
+                    st.stop()
                 note_text = f"完工入庫｜批號 {batch_no}"
                 source_doc_no = selected_material['doc_no'] if selected_material else ""
                 if source_doc_no:
@@ -3635,12 +3650,23 @@ elif page == "🔨 製造作業":
             bf_wh = bf_c1.selectbox("倉庫", WAREHOUSES, key="bf_wh")
             bf_qty = bf_c2.number_input("批次可用量", min_value=0.0, value=0.0, step=1.0)
             bf_date = bf_c3.date_input("製造日期", value=date.today(), key="bf_date")
-            bf_batch_no = st.text_input(
+            bf_batch_no_preview = generate_batch_no(bf_sku, bf_date, bf_name)
+            bf_manual_batch_no = st.checkbox("手動輸入批號", value=False, key="bf_manual_batch_no")
+            st.text_input(
                 "批號",
-                value=generate_batch_no(bf_sku, bf_date, bf_name),
-                key=f"bf_batch_no_{bf_sku}_{str(bf_date)}",
-                help="系統會自動產生批號；補登舊庫存時也可以改成你自己的批號。"
+                value=bf_batch_no_preview,
+                disabled=True,
+                key=f"bf_auto_batch_no_{bf_sku}_{_batch_name_code(bf_name)}_{str(bf_date)}",
+                help="系統會依目前商品與製造日期自動產生批號。"
             )
+            bf_batch_no = ""
+            if bf_manual_batch_no:
+                bf_batch_no = st.text_input(
+                    "手動批號",
+                    value=bf_batch_no_preview,
+                    key=f"bf_manual_batch_no_value_{bf_sku}_{_batch_name_code(bf_name)}_{str(bf_date)}",
+                    help="只有需要沿用外部批號時才填寫；否則請使用系統自動批號。"
+                )
             role_options = KEYERS + ["未指定"]
             br1, br2, br3, br4 = st.columns(4)
             bf_make = br1.selectbox("製造人員", role_options, key="bf_make")
@@ -3652,7 +3678,12 @@ elif page == "🔨 製造作業":
                 if bf_qty <= 0:
                     st.error("請輸入大於 0 的批次可用量")
                 else:
-                    batch_no = bf_batch_no.strip() or generate_batch_no(bf_sku, bf_date, bf_name)
+                    batch_no = bf_batch_no.strip() if bf_manual_batch_no and bf_batch_no.strip() else generate_batch_no(bf_sku, bf_date, bf_name)
+                    expected_sku_part = "".join(ch for ch in str(bf_sku) if ch.isalnum())[-8:]
+                    expected_date_part = str(bf_date).replace("-", "")[:8]
+                    if bf_manual_batch_no and (expected_sku_part not in batch_no or expected_date_part not in batch_no):
+                        st.error(f"手動批號需包含目前商品代碼 {expected_sku_part} 與製造日期 {expected_date_part}")
+                        st.stop()
                     ok, msg = add_batch_stock(
                         batch_no=batch_no,
                         sku=bf_sku,
