@@ -10,7 +10,7 @@ import time
 # ==========================================
 PAGE_TITLE = "numbertalk 雲端庫存系統"
 SPREADSHEET_NAME = "numbertalk-system"
-APP_VERSION = "2026-07-14 領料追蹤版 v4"
+APP_VERSION = "2026-07-14 領料追蹤版 v5"
 
 WAREHOUSES = ["Wen", "千畇", "James", "Imeng"]
 CATEGORIES = ["天然石", "金屬配件", "線材", "包裝材料", "完成品", "數字珠", "數字串", "香料", "手作設備"]
@@ -663,6 +663,13 @@ def get_open_material_issue_options():
     df = load_data("History")
     if df.empty or 'doc_type' not in df.columns:
         return []
+    completed_source_docs = set()
+    if 'note' in df.columns:
+        receipt_rows = df[df['doc_type'].astype(str) == '製造入庫']
+        for note in receipt_rows['note'].astype(str):
+            source_doc = _extract_source_material_doc_no(note)
+            if source_doc:
+                completed_source_docs.add(source_doc)
     work = df[df['doc_type'].astype(str) == '製造領料'].copy()
     if work.empty:
         return []
@@ -678,6 +685,8 @@ def get_open_material_issue_options():
     for _, row in work.iterrows():
         doc_no = str(row.get('doc_no', '')).strip()
         if not doc_no:
+            continue
+        if doc_no in completed_source_docs:
             continue
         product_name = str(row.get('product_name', '') or row.get('sku', ''))
         label = (
@@ -3560,6 +3569,7 @@ elif page == "🔨 製造作業":
             batch_no_input = st.text_input(
                 "批號",
                 value=batch_no_preview,
+                key=f"batch_no_{_mfg_sku_preview}_{str(mfg_date)}",
                 help="系統會自動產生批號；如需沿用外部批號，也可以手動修改。"
             )
 
@@ -3628,6 +3638,7 @@ elif page == "🔨 製造作業":
             bf_batch_no = st.text_input(
                 "批號",
                 value=generate_batch_no(bf_sku, bf_date, bf_name),
+                key=f"bf_batch_no_{bf_sku}_{str(bf_date)}",
                 help="系統會自動產生批號；補登舊庫存時也可以改成你自己的批號。"
             )
             role_options = KEYERS + ["未指定"]
