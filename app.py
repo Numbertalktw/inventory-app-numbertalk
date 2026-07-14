@@ -10,7 +10,7 @@ import time
 # ==========================================
 PAGE_TITLE = "numbertalk 雲端庫存系統"
 SPREADSHEET_NAME = "numbertalk-system"
-APP_VERSION = "2026-07-14 批號版 v2"
+APP_VERSION = "2026-07-14 品名批號版 v3"
 
 WAREHOUSES = ["Wen", "千畇", "James", "Imeng"]
 CATEGORIES = ["天然石", "金屬配件", "線材", "包裝材料", "完成品", "數字珠", "數字串", "香料", "手作設備"]
@@ -487,10 +487,15 @@ def ensure_batch_stock_sheet():
         _ensure_columns(ws, BATCH_STOCK_HEADER)
     return ws
 
-def generate_batch_no(sku, manufacture_date):
+def _batch_name_code(product_name, max_len=8):
+    code = "".join(ch for ch in str(product_name) if ch.isalnum())
+    return code[:max_len] if code else "商品"
+
+def generate_batch_no(sku, manufacture_date, product_name=""):
     date_part = str(manufacture_date).replace("-", "")[:8]
     clean_sku = "".join(ch for ch in str(sku) if ch.isalnum())[-8:] or "SKU"
-    return f"LOT-{clean_sku}-{date_part}-{int(time.time()) % 100000:05d}"
+    name_part = _batch_name_code(product_name)
+    return f"{clean_sku}-{name_part}-{date_part}-{int(time.time()) % 100000:05d}"
 
 def load_batch_stock(sku=None, warehouse=None, only_available=False):
     ensure_batch_stock_sheet()
@@ -3458,7 +3463,7 @@ elif page == "🔨 製造作業":
             qty_out = mfg_c1.number_input("數量", 1.0)
             mfg_date = mfg_c2.date_input("製造日期", value=date.today())
             mfg_user = mfg_c3.selectbox("入庫人員", KEYERS)
-            batch_no_preview = generate_batch_no(_mfg_sku_preview, mfg_date)
+            batch_no_preview = generate_batch_no(_mfg_sku_preview, mfg_date, _mfg_name_preview)
             batch_no_input = st.text_input(
                 "批號",
                 value=batch_no_preview,
@@ -3485,7 +3490,7 @@ elif page == "🔨 製造作業":
             batch_note = st.text_input("批次備註", value="")
             if st.form_submit_button("完工確認"):
                 _mfg_sku = _mfg_sku_preview
-                batch_no = batch_no_input.strip() or generate_batch_no(_mfg_sku, mfg_date)
+                batch_no = batch_no_input.strip() or generate_batch_no(_mfg_sku, mfg_date, _mfg_name_preview)
                 note_text = f"完工入庫｜批號 {batch_no}"
                 if batch_note.strip():
                     note_text += f"｜{batch_note.strip()}"
@@ -3524,7 +3529,7 @@ elif page == "🔨 製造作業":
             bf_date = bf_c3.date_input("製造日期", value=date.today(), key="bf_date")
             bf_batch_no = st.text_input(
                 "批號",
-                value=generate_batch_no(bf_sku, bf_date),
+                value=generate_batch_no(bf_sku, bf_date, bf_name),
                 help="系統會自動產生批號；補登舊庫存時也可以改成你自己的批號。"
             )
             role_options = KEYERS + ["未指定"]
@@ -3538,7 +3543,7 @@ elif page == "🔨 製造作業":
                 if bf_qty <= 0:
                     st.error("請輸入大於 0 的批次可用量")
                 else:
-                    batch_no = bf_batch_no.strip() or generate_batch_no(bf_sku, bf_date)
+                    batch_no = bf_batch_no.strip() or generate_batch_no(bf_sku, bf_date, bf_name)
                     ok, msg = add_batch_stock(
                         batch_no=batch_no,
                         sku=bf_sku,
