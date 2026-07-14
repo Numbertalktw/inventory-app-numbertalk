@@ -10,7 +10,7 @@ import time
 # ==========================================
 PAGE_TITLE = "numbertalk 雲端庫存系統"
 SPREADSHEET_NAME = "numbertalk-system"
-APP_VERSION = "2026-07-14 領料追蹤版 v7"
+APP_VERSION = "2026-07-14 批次序號版 v8"
 
 WAREHOUSES = ["Wen", "千畇", "James", "Imeng"]
 CATEGORIES = ["天然石", "金屬配件", "線材", "包裝材料", "完成品", "數字珠", "數字串", "香料", "手作設備"]
@@ -491,11 +491,31 @@ def _batch_name_code(product_name, max_len=8):
     code = "".join(ch for ch in str(product_name) if ch.isalnum())
     return code[:max_len] if code else "商品"
 
+def _next_batch_sequence(sku):
+    df = load_data("BatchStock")
+    if df.empty or 'sku' not in df.columns:
+        return 1
+    sku_text = str(sku).strip()
+    df = df[df['sku'].astype(str).str.strip() == sku_text]
+    if df.empty:
+        return 1
+    max_seq = 0
+    if 'batch_no' in df.columns:
+        for batch_no in df['batch_no'].astype(str):
+            marker = "-B"
+            if marker not in batch_no:
+                continue
+            suffix = batch_no.rsplit(marker, 1)[-1]
+            if suffix.isdigit():
+                max_seq = max(max_seq, int(suffix))
+    return max(max_seq, len(df)) + 1
+
 def generate_batch_no(sku, manufacture_date, product_name=""):
     date_part = str(manufacture_date).replace("-", "")[:8]
     clean_sku = "".join(ch for ch in str(sku) if ch.isalnum())[-8:] or "SKU"
     name_part = _batch_name_code(product_name)
-    return f"{clean_sku}-{name_part}-{date_part}-{int(time.time()) % 100000:05d}"
+    seq_part = f"B{_next_batch_sequence(sku):03d}"
+    return f"{clean_sku}-{name_part}-{date_part}-{seq_part}"
 
 def load_batch_stock(sku=None, warehouse=None, only_available=False):
     ensure_batch_stock_sheet()
