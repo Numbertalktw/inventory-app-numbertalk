@@ -10,7 +10,7 @@ import time
 # ==========================================
 PAGE_TITLE = "numbertalk 雲端庫存系統"
 SPREADSHEET_NAME = "numbertalk-system"
-APP_VERSION = "2026-07-14 批次序號版 v8"
+APP_VERSION = "2026-07-15 FIFO批次序號版 v9"
 
 WAREHOUSES = ["Wen", "千畇", "James", "Imeng"]
 CATEGORIES = ["天然石", "金屬配件", "線材", "包裝材料", "完成品", "數字珠", "數字串", "香料", "手作設備"]
@@ -510,6 +510,15 @@ def _next_batch_sequence(sku):
                 max_seq = max(max_seq, int(suffix))
     return max(max_seq, len(df)) + 1
 
+def _batch_sequence_from_no(batch_no):
+    text = str(batch_no)
+    marker = "-B"
+    if marker in text:
+        suffix = text.rsplit(marker, 1)[-1]
+        if suffix.isdigit():
+            return int(suffix)
+    return 999999
+
 def generate_batch_no(sku, manufacture_date, product_name=""):
     date_part = str(manufacture_date).replace("-", "")[:8]
     clean_sku = "".join(ch for ch in str(sku) if ch.isalnum())[-8:] or "SKU"
@@ -572,7 +581,8 @@ def plan_fifo_batches(sku, warehouse, qty_needed):
     df = df.copy()
     df['_mfg_sort'] = pd.to_datetime(df['manufacture_date'], errors='coerce')
     df['_mfg_sort'] = df['_mfg_sort'].fillna(pd.Timestamp.max)
-    df = df.sort_values(['_mfg_sort', 'created_at', 'batch_no'])
+    df['_batch_seq'] = df['batch_no'].apply(_batch_sequence_from_no)
+    df = df.sort_values(['_mfg_sort', '_batch_seq', 'created_at', 'batch_no'])
     allocations = []
     remaining = qty_needed
     for _, row in df.iterrows():
@@ -773,7 +783,9 @@ def render_batch_stock_table(sku=None, warehouse=None):
     if df_batch.empty:
         st.info("尚無批次庫存")
         return
-    df_show = df_batch.sort_values(['sku', 'warehouse', 'manufacture_date', 'batch_no'])
+    df_show = df_batch.copy()
+    df_show['_batch_seq'] = df_show['batch_no'].apply(_batch_sequence_from_no)
+    df_show = df_show.sort_values(['sku', 'warehouse', 'manufacture_date', '_batch_seq', 'batch_no'])
     cols = [
         'batch_no', 'sku', 'product_name', 'warehouse', 'manufacture_date',
         'qty_in', 'qty_available', 'make_person', 'pack_person',
