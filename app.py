@@ -10,7 +10,7 @@ import time
 # ==========================================
 PAGE_TITLE = "numbertalk 雲端庫存系統"
 SPREADSHEET_NAME = "numbertalk-system"
-APP_VERSION = "2026-07-14 領料追蹤版 v6"
+APP_VERSION = "2026-07-14 領料追蹤版 v7"
 
 WAREHOUSES = ["Wen", "千畇", "James", "Imeng"]
 CATEGORIES = ["天然石", "金屬配件", "線材", "包裝材料", "完成品", "數字珠", "數字串", "香料", "手作設備"]
@@ -3542,7 +3542,7 @@ elif page == "🔨 製造作業":
                     add_transaction("製造領料", date.today(), x['sku'], x['wh'], x['qty'], "工廠", m_note)
                 st.session_state['m_in_list'] = []; st.success("OK"); time.sleep(1); st.rerun()
     with t2:
-        with st.form("m2_form"):
+        with st.container():
             material_options = get_open_material_issue_options()
             material_labels = ["不指定來源領料"] + [m['label'] for m in material_options]
             material_sel = st.selectbox(
@@ -3601,7 +3601,7 @@ elif page == "🔨 製造作業":
             ship_person = r3.selectbox("出貨人員", role_options, index=_role_index("empShip", mfg_user))
             service_person = r4.selectbox("服務人員", role_options, index=_role_index("empSvc"))
             batch_note = st.text_input("批次備註", value="")
-            if st.form_submit_button("完工確認"):
+            if st.button("完工確認", type="primary", key="m2_confirm"):
                 _mfg_sku = _mfg_sku_preview
                 batch_no = batch_no_input.strip() if manual_batch_no and batch_no_input.strip() else generate_batch_no(_mfg_sku, mfg_date, _mfg_name_preview)
                 expected_sku_part = "".join(ch for ch in str(_mfg_sku) if ch.isalnum())[-8:]
