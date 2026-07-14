@@ -10,7 +10,7 @@ import time
 # ==========================================
 PAGE_TITLE = "numbertalk 雲端庫存系統"
 SPREADSHEET_NAME = "numbertalk-system"
-APP_VERSION = "2026-07-14 品名批號版 v3"
+APP_VERSION = "2026-07-14 領料追蹤版 v4"
 
 WAREHOUSES = ["Wen", "千畇", "James", "Imeng"]
 CATEGORIES = ["天然石", "金屬配件", "線材", "包裝材料", "完成品", "數字珠", "數字串", "香料", "手作設備"]
@@ -621,6 +621,14 @@ def _extract_batch_no(note):
     tail = text.split(marker, 1)[1]
     return tail.split("｜", 1)[0].strip()
 
+def _extract_source_material_doc_no(note):
+    text = str(note or "")
+    marker = "來源領料 "
+    if marker not in text:
+        return ""
+    tail = text.split(marker, 1)[1]
+    return tail.split("｜", 1)[0].strip()
+
 def adjust_batch_qty(batch_no, delta_available=0, delta_in=0):
     if not batch_no:
         return False
@@ -648,6 +656,74 @@ def adjust_batch_qty(batch_no, delta_available=0, delta_in=0):
                 ws.update_cell(row_num, in_idx + 1, _num_at(in_idx) + float(delta_in))
             clear_cache()
             return True
+    return False
+
+def get_open_material_issue_options():
+    """Return manufacturing material issue rows that are not marked completed."""
+    df = load_data("History")
+    if df.empty or 'doc_type' not in df.columns:
+        return []
+    work = df[df['doc_type'].astype(str) == '製造領料'].copy()
+    if work.empty:
+        return []
+    if 'note' not in work.columns:
+        work['note'] = ""
+    if 'qty' in work.columns:
+        work['qty'] = pd.to_numeric(work['qty'], errors='coerce').fillna(0)
+        work = work[work['qty'] > 0]
+    work = work[~work['note'].astype(str).str.contains('已完工入庫', na=False)]
+    work = work[~work['note'].astype(str).str.contains('拆解回庫', na=False)]
+    work = work.sort_index(ascending=False).head(80)
+    options = []
+    for _, row in work.iterrows():
+        doc_no = str(row.get('doc_no', '')).strip()
+        if not doc_no:
+            continue
+        product_name = str(row.get('product_name', '') or row.get('sku', ''))
+        label = (
+            f"{doc_no} | {row.get('date', '')} | {product_name} | "
+            f"{row.get('warehouse', '')} | {float(row.get('qty', 0) or 0):.0f}"
+        )
+        options.append({
+            "label": label,
+            "doc_no": doc_no,
+            "date": str(row.get('date', '')),
+            "sku": str(row.get('sku', '')),
+            "product_name": product_name,
+            "warehouse": str(row.get('warehouse', '')),
+            "qty": float(row.get('qty', 0) or 0),
+            "user": str(row.get('user', '')),
+            "note": str(row.get('note', '')),
+        })
+    return options
+
+def mark_material_issue_completed(doc_no, batch_no="", completed=True):
+    ws = get_worksheet_for_write("History")
+    if not ws or not doc_no:
+        return False
+    try:
+        values = ws.get_all_values()
+        if not values:
+            return False
+        header = values[0]
+        doc_idx = header.index("doc_no")
+        note_idx = header.index("note")
+        marker_prefix = "已完工入庫"
+        marker = f"{marker_prefix} {batch_no}".strip()
+        for row_num, row in enumerate(values[1:], 2):
+            cell_doc = row[doc_idx] if doc_idx < len(row) else ""
+            if str(cell_doc).strip() != str(doc_no).strip():
+                continue
+            current_note = row[note_idx] if note_idx < len(row) else ""
+            parts = [p.strip() for p in str(current_note).split("｜") if p.strip()]
+            parts = [p for p in parts if not p.startswith(marker_prefix)]
+            if completed:
+                parts.append(marker)
+            ws.update_cell(row_num, note_idx + 1, "｜".join(parts))
+            clear_cache()
+            return True
+    except Exception:
+        return False
     return False
 
 def ship_stock_fifo(sku, warehouse, qty, user, note, ship_method="", ship_no=""):
@@ -727,10 +803,13 @@ def delete_transaction(doc_no):
             r_type, r_sku, r_wh, r_qty = record[0], record[3], record[4], float(record[5])
             r_note = record[7] if len(record) > 7 else ""
             r_batch_no = _extract_batch_no(r_note)
+            r_source_material_doc_no = _extract_source_material_doc_no(r_note)
             if r_batch_no and r_type == '銷售出貨':
                 adjust_batch_qty(r_batch_no, delta_available=r_qty)
             elif r_batch_no and r_type == '製造入庫':
                 adjust_batch_qty(r_batch_no, delta_available=-r_qty, delta_in=-r_qty)
+                if r_source_material_doc_no:
+                    mark_material_issue_completed(r_source_material_doc_no, completed=False)
             reverse_factor = 1 if r_type in ['銷售出貨', '製造領料', '移庫(撥出)'] else -1
             update_stock_qty(r_sku, r_wh, r_qty * reverse_factor)
             ws_hist.delete_rows(row_num)
@@ -3455,6 +3534,20 @@ elif page == "🔨 製造作業":
                 st.session_state['m_in_list'] = []; st.success("OK"); time.sleep(1); st.rerun()
     with t2:
         with st.form("m2_form"):
+            material_options = get_open_material_issue_options()
+            material_labels = ["不指定來源領料"] + [m['label'] for m in material_options]
+            material_sel = st.selectbox(
+                "來源製造領料",
+                material_labels,
+                help="選擇這次完工入庫對應的領料紀錄，方便追蹤原料是否已製成並入庫。"
+            )
+            selected_material = None
+            if material_sel != "不指定來源領料":
+                selected_material = material_options[material_labels.index(material_sel) - 1]
+                st.caption(
+                    f"來源：{selected_material['doc_no']}｜{selected_material['product_name']}｜"
+                    f"{selected_material['warehouse']}｜領料 {selected_material['qty']:.0f}"
+                )
             sel_out = st.selectbox("成品", prods['label'])
             _mfg_sku_preview = sel_out.split(" | ")[0]
             _mfg_name_preview = sel_out.split(" | ")[1].split(" (")[0] if " | " in sel_out else ""
@@ -3492,6 +3585,9 @@ elif page == "🔨 製造作業":
                 _mfg_sku = _mfg_sku_preview
                 batch_no = batch_no_input.strip() or generate_batch_no(_mfg_sku, mfg_date, _mfg_name_preview)
                 note_text = f"完工入庫｜批號 {batch_no}"
+                source_doc_no = selected_material['doc_no'] if selected_material else ""
+                if source_doc_no:
+                    note_text += f"｜來源領料 {source_doc_no}"
                 if batch_note.strip():
                     note_text += f"｜{batch_note.strip()}"
                 if add_transaction("製造入庫", date.today(), _mfg_sku, wh_out, qty_out, mfg_user, note_text):
@@ -3506,9 +3602,11 @@ elif page == "🔨 製造作業":
                         pack_person="" if pack_person == "未指定" else pack_person,
                         ship_person="" if ship_person == "未指定" else ship_person,
                         service_person="" if service_person == "未指定" else service_person,
-                        source_doc_no=batch_no,
+                        source_doc_no=source_doc_no or batch_no,
                         note=batch_note.strip()
                     )
+                    if source_doc_no:
+                        mark_material_issue_completed(source_doc_no, batch_no, completed=True)
                     if b_ok:
                         st.success(f"完工入庫成功！批號：{batch_no}")
                     else:
