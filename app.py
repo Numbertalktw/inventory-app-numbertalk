@@ -10,7 +10,7 @@ import time
 # ==========================================
 PAGE_TITLE = "numbertalk 雲端庫存系統"
 SPREADSHEET_NAME = "numbertalk-system"
-APP_VERSION = "2026-07-15 單次領料單版 v12"
+APP_VERSION = "2026-07-15 商品載入修正版 v13"
 
 WAREHOUSES = ["Wen", "千畇", "James", "Imeng"]
 CATEGORIES = ["天然石", "金屬配件", "線材", "包裝材料", "完成品", "數字珠", "數字串", "香料", "手作設備"]
@@ -210,10 +210,14 @@ def get_worksheet_for_write(sheet_name):
 @st.cache_data(ttl=120)
 def load_data(sheet_name):
     import time as _time
-    ws = get_worksheet(sheet_name)
-    if ws is None:
-        return pd.DataFrame()
     for _attempt in range(3):
+        ws = get_worksheet(sheet_name)
+        if ws is None:
+            if _attempt < 2:
+                get_spreadsheet.clear()
+                _time.sleep(2 + _attempt * 2)
+                continue
+            return pd.DataFrame()
         try:
             data = ws.get_all_records()
             df = pd.DataFrame(data)
@@ -288,12 +292,21 @@ def load_product_prices():
         return {}
 
 def get_formatted_product_df():
-    df = load_data("Products")
+    df = pd.DataFrame()
+    for attempt in range(2):
+        try:
+            df = load_data("Products")
+        except Exception:
+            df = pd.DataFrame()
+        if not df.empty:
+            break
+        if attempt == 0:
+            clear_cache()
+            time.sleep(2)
     if df.empty: return df
-    try:
-        price_map = load_product_prices()
-        df['price'] = df['sku'].astype(str).map(price_map).fillna(0.0)
-    except:
+    if 'price' in df.columns:
+        df['price'] = pd.to_numeric(df['price'], errors='coerce').fillna(0.0)
+    else:
         df['price'] = 0.0
     df['sku'] = df['sku'].astype(str)
     df['name'] = df['name'].astype(str)
