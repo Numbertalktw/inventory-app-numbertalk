@@ -10,7 +10,7 @@ import time
 # ==========================================
 PAGE_TITLE = "numbertalk 雲端庫存系統"
 SPREADSHEET_NAME = "numbertalk-system"
-APP_VERSION = "2026-07-15 測試訂單刪除版 v11"
+APP_VERSION = "2026-07-15 單次領料單版 v12"
 
 WAREHOUSES = ["Wen", "千畇", "James", "Imeng"]
 CATEGORIES = ["天然石", "金屬配件", "線材", "包裝材料", "完成品", "數字珠", "數字串", "香料", "手作設備"]
@@ -689,7 +689,7 @@ def adjust_batch_qty(batch_no, delta_available=0, delta_in=0):
     return False
 
 def get_open_material_issue_options():
-    """Return manufacturing material issue rows that are not marked completed."""
+    """Return open manufacturing material issue documents grouped by doc_no."""
     df = load_data("History")
     if df.empty or 'doc_type' not in df.columns:
         return []
@@ -710,29 +710,54 @@ def get_open_material_issue_options():
         work = work[work['qty'] > 0]
     work = work[~work['note'].astype(str).str.contains('已完工入庫', na=False)]
     work = work[~work['note'].astype(str).str.contains('拆解回庫', na=False)]
-    work = work.sort_index(ascending=False).head(80)
+    work = work.sort_index(ascending=False).head(200)
     options = []
-    for _, row in work.iterrows():
-        doc_no = str(row.get('doc_no', '')).strip()
+    for doc_no, group in work.groupby(work['doc_no'].astype(str), sort=False):
+        doc_no = str(doc_no).strip()
         if not doc_no:
             continue
         if doc_no in completed_source_docs:
             continue
-        product_name = str(row.get('product_name', '') or row.get('sku', ''))
+        first = group.iloc[0]
+        product_names = []
+        warehouses = []
+        total_qty = 0.0
+        for _, row in group.iterrows():
+            product_name = str(row.get('product_name', '') or row.get('sku', '')).strip()
+            if product_name and product_name not in product_names:
+                product_names.append(product_name)
+            wh = str(row.get('warehouse', '')).strip()
+            if wh and wh not in warehouses:
+                warehouses.append(wh)
+            total_qty += float(row.get('qty', 0) or 0)
+        item_summary = "、".join(product_names[:3])
+        if len(product_names) > 3:
+            item_summary += f" 等{len(product_names)}項"
+        warehouse_summary = "、".join(warehouses)
         label = (
-            f"{doc_no} | {row.get('date', '')} | {product_name} | "
-            f"{row.get('warehouse', '')} | {float(row.get('qty', 0) or 0):.0f}"
+            f"{doc_no} | {first.get('date', '')} | {item_summary} | "
+            f"{warehouse_summary} | 共{len(group)}項 | {total_qty:.0f}"
         )
         options.append({
             "label": label,
             "doc_no": doc_no,
-            "date": str(row.get('date', '')),
-            "sku": str(row.get('sku', '')),
-            "product_name": product_name,
-            "warehouse": str(row.get('warehouse', '')),
-            "qty": float(row.get('qty', 0) or 0),
-            "user": str(row.get('user', '')),
-            "note": str(row.get('note', '')),
+            "date": str(first.get('date', '')),
+            "sku": str(first.get('sku', '')),
+            "product_name": item_summary,
+            "warehouse": warehouse_summary,
+            "qty": total_qty,
+            "user": str(first.get('user', '')),
+            "note": str(first.get('note', '')),
+            "item_count": int(len(group)),
+            "items": [
+                {
+                    "sku": str(row.get('sku', '')),
+                    "product_name": str(row.get('product_name', '') or row.get('sku', '')),
+                    "warehouse": str(row.get('warehouse', '')),
+                    "qty": float(row.get('qty', 0) or 0),
+                }
+                for _, row in group.iterrows()
+            ],
         })
     return options
 
@@ -749,6 +774,7 @@ def mark_material_issue_completed(doc_no, batch_no="", completed=True):
         note_idx = header.index("note")
         marker_prefix = "已完工入庫"
         marker = f"{marker_prefix} {batch_no}".strip()
+        updated = False
         for row_num, row in enumerate(values[1:], 2):
             cell_doc = row[doc_idx] if doc_idx < len(row) else ""
             if str(cell_doc).strip() != str(doc_no).strip():
@@ -759,6 +785,8 @@ def mark_material_issue_completed(doc_no, batch_no="", completed=True):
             if completed:
                 parts.append(marker)
             ws.update_cell(row_num, note_idx + 1, "｜".join(parts))
+            updated = True
+        if updated:
             clear_cache()
             return True
     except Exception:
@@ -801,7 +829,7 @@ def render_batch_stock_table(sku=None, warehouse=None):
     existing = [c for c in cols if c in df_show.columns]
     st.dataframe(df_show[existing].rename(columns=rename), use_container_width=True, hide_index=True)
 
-def add_transaction(doc_type, date_str, sku, wh, qty, user, note, ship_method="", ship_no="", cost=0):
+def add_transaction(doc_type, date_str, sku, wh, qty, user, note, ship_method="", ship_no="", cost=0, doc_no=None):
     ws_hist = get_worksheet_for_write("History")
     if not ws_hist:
         return False
@@ -812,7 +840,7 @@ def add_transaction(doc_type, date_str, sku, wh, qty, user, note, ship_method=""
         if not match.empty: p_name = match.iloc[0]['name']
 
     prefix = {"進貨":"IN", "銷售出貨":"OUT", "製造領料":"MO", "製造入庫":"PD", "移庫(撥出)":"TR-O", "移庫(撥入)":"TR-I"}.get(doc_type, "ADJ")
-    doc_no = f"{prefix}-{int(time.time())}"
+    doc_no = str(doc_no).strip() if doc_no else f"{prefix}-{int(time.time())}"
     import time as _t
     for _retry in range(3):
         try:
@@ -3637,9 +3665,18 @@ elif page == "🔨 製造作業":
                 st.write(f"**{item['name']}** - {item['wh']} x{item['qty']}")
                 if st.button("移除", key=f"rm_m_{i}"): st.session_state['m_in_list'].pop(i); st.rerun()
             if st.button("批次確認領料", type="primary"):
+                material_doc_no = f"MO-{int(time.time())}"
+                ok_count = 0
                 for x in st.session_state['m_in_list']:
-                    add_transaction("製造領料", date.today(), x['sku'], x['wh'], x['qty'], "工廠", m_note)
-                st.session_state['m_in_list'] = []; st.success("OK"); time.sleep(1); st.rerun()
+                    if add_transaction("製造領料", date.today(), x['sku'], x['wh'], x['qty'], "工廠", m_note, doc_no=material_doc_no):
+                        ok_count += 1
+                if ok_count == len(st.session_state['m_in_list']):
+                    st.session_state['m_in_list'] = []
+                    st.success(f"領料完成，單號：{material_doc_no}")
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.error(f"部分領料失敗：已完成 {ok_count} / {len(st.session_state['m_in_list'])} 項，請檢查 Google Sheets 後再重試。")
     with t2:
         with st.container():
             material_options = get_open_material_issue_options()
@@ -3654,8 +3691,20 @@ elif page == "🔨 製造作業":
                 selected_material = material_options[material_labels.index(material_sel) - 1]
                 st.caption(
                     f"來源：{selected_material['doc_no']}｜{selected_material['product_name']}｜"
-                    f"{selected_material['warehouse']}｜領料 {selected_material['qty']:.0f}"
+                    f"{selected_material['warehouse']}｜共 {selected_material.get('item_count', 1)} 項｜領料 {selected_material['qty']:.0f}"
                 )
+                if selected_material.get("items"):
+                    with st.expander("查看此領料單品項", expanded=False):
+                        st.dataframe(
+                            pd.DataFrame(selected_material["items"]).rename(columns={
+                                "sku": "貨號",
+                                "product_name": "品名",
+                                "warehouse": "倉庫",
+                                "qty": "數量",
+                            }),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
             sel_out = st.selectbox("成品", prods['label'])
             _mfg_sku_preview = sel_out.split(" | ")[0]
             _mfg_name_preview = sel_out.split(" | ")[1].split(" (")[0] if " | " in sel_out else ""
