@@ -10,7 +10,7 @@ import time
 # ==========================================
 PAGE_TITLE = "numbertalk 雲端庫存系統"
 SPREADSHEET_NAME = "numbertalk-system"
-APP_VERSION = "2026-07-15 測試訂單刪除版 v10"
+APP_VERSION = "2026-07-15 測試訂單刪除版 v11"
 
 WAREHOUSES = ["Wen", "千畇", "James", "Imeng"]
 CATEGORIES = ["天然石", "金屬配件", "線材", "包裝材料", "完成品", "數字珠", "數字串", "香料", "手作設備"]
@@ -1424,27 +1424,33 @@ def delete_wage_entries_for_order(order_no):
         clear_cache()
     return deleted
 
-def delete_order(order_no):
+def delete_order(order_no, current_status="", cleanup_wages=False):
     ensure_order_sheets()
     ws_orders = get_worksheet_for_write("Orders") or get_worksheet("Orders")
     ws_items = get_worksheet_for_write("OrderItems") or get_worksheet("OrderItems")
     if not ws_orders or not ws_items:
         st.error("無法連線到工作表")
         return False
-    if order_has_shipments(order_no):
+    unshipped_statuses = {"已確認", "已成立", "待處理", "未付款/未出貨", "已取消"}
+    needs_shipment_check = str(current_status) not in unshipped_statuses
+    if needs_shipment_check and order_has_shipments(order_no):
         st.error("此訂單已有出貨紀錄。請先到出貨/歷史紀錄刪除出貨紀錄，讓庫存回補後，再刪除訂單。")
         return False
     try:
         _delete_rows_by_column_value(ws_items, "order_no", order_no)
         deleted_orders = _delete_rows_by_column_value(ws_orders, "order_no", order_no)
-        delete_wage_entries_for_order(order_no)
+        if cleanup_wages:
+            delete_wage_entries_for_order(order_no)
         if deleted_orders == 0:
             st.error(f"找不到訂單 {order_no}")
             return False
         clear_cache()
         return True
     except Exception as e:
-        st.error(f"刪除失敗: {e}")
+        if "429" in str(e):
+            st.error("刪除失敗：Google Sheets 讀取次數暫時超過限制，請等待 60 秒後再按一次刪除。")
+        else:
+            st.error(f"刪除失敗: {e}")
         return False
 
 # ==========================================
@@ -3198,7 +3204,7 @@ elif page == "🛒 訂單管理":
                                 st.markdown("---")
                                 st.caption("測試訂單可直接刪除；若已有出貨紀錄，系統會要求先刪出貨紀錄回補庫存。")
                                 if st.button("🗑️ 刪除此訂單", key=f"{kp}_delete_order_{ono}"):
-                                    if delete_order(ono):
+                                    if delete_order(ono, current_status=status, cleanup_wages=False):
                                         st.success(f"已刪除訂單 {ono}")
                                         time.sleep(1)
                                         st.rerun()
