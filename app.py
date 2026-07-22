@@ -57,12 +57,56 @@ def calc_liunian(year, birth_month, birth_day):
     chain = _reduce_chain(total)
     return "/".join(str(x) for x in chain)
 
-def calc_jieduan(birth_year, birth_month):
-    """階段數 = 出生年所有數字 + 生日月，縮減"""
-    digits_str = str(birth_year) + str(birth_month)
+def calc_jieduan(birth_year, birth_month=None, birth_day=None,
+                  birth_hour=None, birth_minute=None):
+    """依指定階段累加出生年、月、日、時、分的所有數字並縮減。"""
+    parts = [birth_year, birth_month, birth_day, birth_hour, birth_minute]
+    digits_str = "".join(str(part) for part in parts if part is not None)
     total = sum(int(d) for d in digits_str)
     chain = _reduce_chain(total)
     return "/".join(str(x) for x in chain)
+
+def parse_birth_time(time_str):
+    """解析出生時間 HH:MM；未填或格式錯誤時回傳 None。"""
+    if not time_str or not str(time_str).strip():
+        return None
+    try:
+        parsed = datetime.strptime(str(time_str).strip(), "%H:%M")
+        return parsed.hour, parsed.minute
+    except ValueError:
+        return None
+
+def current_age(birth_year, birth_month, birth_day, today=None):
+    """以生日是否已過計算目前實歲。"""
+    if today is None:
+        today = datetime.now().date()
+    return today.year - birth_year - (
+        (today.month, today.day) < (birth_month, birth_day)
+    )
+
+def current_stage(age):
+    """依實歲回傳階段名稱，以及計算時應使用到第幾個出生欄位。"""
+    if age >= 61:
+        return "老年階段", "61歲以上", 1
+    if age >= 41:
+        return "中年階段", "41～60歲", 2
+    if age >= 21:
+        return "青年階段", "21～40歲", 3
+    if age >= 11:
+        return "少年階段", "11～20歲", 4
+    if age == 10:
+        return "幼年轉少年階段", "目前10歲，滿11歲後進入少年階段", 5
+    return "幼年階段", "0～10歲", 5
+
+def calc_current_stage_number(birthday, stage_part_count, birth_time=None):
+    """依目前階段取出生資料前 N 欄，回傳完整縮減過程。"""
+    year, month, day = birthday
+    parsed_time = parse_birth_time(birth_time)
+    hour, minute = parsed_time if parsed_time else (None, None)
+    parts = [year, month, day, hour, minute][:stage_part_count]
+    if any(part is None for part in parts):
+        return None
+    return calc_jieduan(*parts)
 
 def personal_year_range(birth_month, birth_day, today=None):
     """依生日是否已過決定三個年份"""
@@ -101,45 +145,52 @@ def format_phone(phone_val):
         return '0' + digits
     return s
 
-def render_numerology_table(bday_str, lunar_bday_str="", key_prefix=""):
-    """參考 IF Crystal 格式：顯示三年流年 x 階段數對照表（國曆 + 農曆並排）"""
+def render_numerology_table(bday_str, lunar_bday_str="", birth_time="", key_prefix=""):
+    """依目前實歲顯示國／農曆五大階段數及三年流年對照表。"""
     parsed = parse_birthday(bday_str)
     if not parsed:
-        # 如果只有農曆生日，用農曆生日來計算
         lunar_only = parse_birthday(lunar_bday_str) if lunar_bday_str else None
         if not lunar_only:
             st.info("請輸入生日（格式: YYYY/MM/DD）以顯示數字能量")
             return False
-        # 只有農曆 → 只顯示農曆階段數
-        ly, lm, ld = lunar_only
-        lunar_jieduan = calc_jieduan(ly, lm)
-        lunar_jd_final = lunar_jieduan.split("/")[-1]
-        st.markdown("##### 📊 流年 × 階段數 三年對照表")
-        st.markdown(f"**🌙 農曆階段數：** `{lunar_jd_final}`　（{ly}年 + {lm}月 → {lunar_jieduan}）")
-        st.markdown("*（未填國曆生日，僅顯示農曆階段數）*")
+        age = current_age(*lunar_only)
+        stage_name, stage_range, part_count = current_stage(age)
+        lunar_jieduan = calc_current_stage_number(lunar_only, part_count, birth_time)
+        st.markdown(f"##### 📊 目前階段：{stage_name}（{age}歲｜{stage_range}）")
+        if lunar_jieduan:
+            st.markdown(f"**🌙 農曆階段數：** `{lunar_jieduan.split('/')[-1]}`　（完整計算：{lunar_jieduan}）")
+        else:
+            st.warning("目前階段需要出生時間（HH:MM）才能計算農曆階段數。")
+        st.caption("未填國曆生日，目前年齡暫以農曆生日估算。")
         return True
     by, bm, bd = parsed
+    age = current_age(by, bm, bd)
+    stage_name, stage_range, part_count = current_stage(age)
     years = personal_year_range(bm, bd)
     labels = ["去年", "今年", "明年"]
-    jieduan = calc_jieduan(by, bm)
-    jd_final = jieduan.split("/")[-1]
+    jieduan = calc_current_stage_number(parsed, part_count, birth_time)
+    jd_final = jieduan.split("/")[-1] if jieduan else ""
 
     lunar_parsed = parse_birthday(lunar_bday_str) if lunar_bday_str else None
     lunar_jd_final = ""
     lunar_jieduan = ""
     if lunar_parsed:
-        ly, lm, ld = lunar_parsed
-        lunar_jieduan = calc_jieduan(ly, lm)
-        lunar_jd_final = lunar_jieduan.split("/")[-1]
+        lunar_jieduan = calc_current_stage_number(lunar_parsed, part_count, birth_time)
+        lunar_jd_final = lunar_jieduan.split("/")[-1] if lunar_jieduan else ""
 
-    st.markdown("##### 📊 流年 × 階段數 三年對照表")
+    st.markdown(f"##### 📊 目前階段：{stage_name}（{age}歲｜{stage_range}）")
 
     col_solar, col_lunar = st.columns(2)
     with col_solar:
-        st.markdown(f"**🌞 國曆階段數：** `{jd_final}`　（{by}年 + {bm}月 → {jieduan}）")
+        if jieduan:
+            st.markdown(f"**🌞 國曆階段數：** `{jd_final}`　（完整計算：{jieduan}）")
+        else:
+            st.warning("目前階段需要出生時間（HH:MM）才能計算國曆階段數。")
     with col_lunar:
-        if lunar_parsed:
-            st.markdown(f"**🌙 農曆階段數：** `{lunar_jd_final}`　（{ly}年 + {lm}月 → {lunar_jieduan}）")
+        if lunar_jieduan:
+            st.markdown(f"**🌙 農曆階段數：** `{lunar_jd_final}`　（完整計算：{lunar_jieduan}）")
+        elif lunar_parsed:
+            st.warning("目前階段需要出生時間（HH:MM）才能計算農曆階段數。")
         else:
             st.markdown("**🌙 農曆階段數：** *未填寫農曆生日*")
 
@@ -151,12 +202,13 @@ def render_numerology_table(bday_str, lunar_bday_str="", key_prefix=""):
             "年份": f"{yr}（{lbl}）",
             "流年計算": f"{yr}年 + {bm}月 + {bd}日 → {ln}",
             "流年數": ln_final,
-            "國曆階段數計算": f"{by}年 + {bm}月 → {jieduan}",
-            "國曆階段數": jd_final,
+            "目前階段": stage_name,
+            "國曆階段數計算": jieduan or "缺少出生時間",
+            "國曆階段數": jd_final or "—",
         }
         if lunar_parsed:
-            row_data["農曆階段數計算"] = f"{ly}年 + {lm}月 → {lunar_jieduan}"
-            row_data["農曆階段數"] = lunar_jd_final
+            row_data["農曆階段數計算"] = lunar_jieduan or "缺少出生時間"
+            row_data["農曆階段數"] = lunar_jd_final or "—"
         rows.append(row_data)
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
     return True
@@ -2952,7 +3004,7 @@ elif page == "🛒 訂單管理":
         o_lunar_bday = bd2.text_input("🌙 農曆生日 (YYYY/MM/DD)", key="o_lbday")
         o_birth_time = bd3.text_input("🕐 出生時間 (HH:MM)", key="o_btime")
         if o_birthday or o_lunar_bday:
-            render_numerology_table(o_birthday, o_lunar_bday, key_prefix="new_order")
+            render_numerology_table(o_birthday, o_lunar_bday, o_birth_time, key_prefix="new_order")
         o_note = st.text_input("訂單備註", key="o_note")
         o_user = st.selectbox("建立人", ["James", "Imeng", "小幫手"], key="o_user")
 
@@ -3085,7 +3137,7 @@ elif page == "🛒 訂單管理":
                             st.write(f"{bd_txt}  {lb_txt}  {bt_txt}".strip())
                         if o_bday or o_lbday:
                             with st.container():
-                                render_numerology_table(o_bday, o_lbday, key_prefix=f"{kp}_{ono}")
+                                render_numerology_table(o_bday, o_lbday, o_btime, key_prefix=f"{kp}_{ono}")
                         r_disc = float(row.get('discount', 0))
                         r_ship = float(row.get('shipping_fee', 0))
                         r_items = float(row.get('items_total', 0))
@@ -3325,7 +3377,7 @@ elif page == "🛒 訂單管理":
                     st.write("　".join(bd_parts))
                 if det_bday or det_lbday:
                     st.markdown(f"#### 🔢 數字能量")
-                    render_numerology_table(det_bday, det_lbday, key_prefix="detail")
+                    render_numerology_table(det_bday, det_lbday, det_btime, key_prefix="detail")
 
                 # === 訂單品項列表 ===
                 st.markdown("---")
@@ -3495,7 +3547,7 @@ elif page == "👥 會員管理":
                         st.markdown("#### 🔢 數字能量")
                         if m_btime:
                             st.write(f"🕐 出生時間: {m_btime}")
-                        render_numerology_table(m_bday, m_lbday, key_prefix="member")
+                        render_numerology_table(m_bday, m_lbday, m_btime, key_prefix="member")
                     with st.form("edit_member"):
                         em_phone = st.text_input("電話", value=str(m_data.get('phone', '')))
                         em_email = st.text_input("Email", value=str(m_data.get('email', '')))
