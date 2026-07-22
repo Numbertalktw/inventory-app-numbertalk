@@ -108,6 +108,21 @@ def calc_current_stage_number(birthday, stage_part_count, birth_time=None):
         return None
     return calc_jieduan(*parts)
 
+def format_stage_calculation(birthday, stage_part_count, birth_time, result):
+    """顯示階段數所使用的完整出生欄位與縮減結果。"""
+    if not result:
+        return "缺少出生時間"
+    year, month, day = birthday
+    parsed_time = parse_birth_time(birth_time)
+    hour, minute = parsed_time if parsed_time else (None, None)
+    values = [year, month, day, hour, minute][:stage_part_count]
+    units = ["年", "月", "日", "時", "分"][:stage_part_count]
+    formatted = []
+    for index, (value, unit) in enumerate(zip(values, units)):
+        text = str(value) if index == 0 else f"{value:02d}"
+        formatted.append(f"{text}{unit}")
+    return " + ".join(formatted) + f" → {result}"
+
 def personal_year_range(birth_month, birth_day, today=None):
     """依生日是否已過決定三個年份"""
     if today is None:
@@ -156,9 +171,12 @@ def render_numerology_table(bday_str, lunar_bday_str="", birth_time="", key_pref
         age = current_age(*lunar_only)
         stage_name, stage_range, part_count = current_stage(age)
         lunar_jieduan = calc_current_stage_number(lunar_only, part_count, birth_time)
+        lunar_formula = format_stage_calculation(
+            lunar_only, part_count, birth_time, lunar_jieduan
+        )
         st.markdown(f"##### 📊 目前階段：{stage_name}（{age}歲｜{stage_range}）")
         if lunar_jieduan:
-            st.markdown(f"**🌙 農曆階段數：** `{lunar_jieduan.split('/')[-1]}`　（完整計算：{lunar_jieduan}）")
+            st.markdown(f"**🌙 農曆階段數：** `{lunar_jieduan.split('/')[-1]}`　（{lunar_formula}）")
         else:
             st.warning("目前階段需要出生時間（HH:MM）才能計算農曆階段數。")
         st.caption("未填國曆生日，目前年齡暫以農曆生日估算。")
@@ -170,6 +188,7 @@ def render_numerology_table(bday_str, lunar_bday_str="", birth_time="", key_pref
     labels = ["去年", "今年", "明年"]
     jieduan = calc_current_stage_number(parsed, part_count, birth_time)
     jd_final = jieduan.split("/")[-1] if jieduan else ""
+    solar_formula = format_stage_calculation(parsed, part_count, birth_time, jieduan)
 
     lunar_parsed = parse_birthday(lunar_bday_str) if lunar_bday_str else None
     lunar_jd_final = ""
@@ -177,18 +196,21 @@ def render_numerology_table(bday_str, lunar_bday_str="", birth_time="", key_pref
     if lunar_parsed:
         lunar_jieduan = calc_current_stage_number(lunar_parsed, part_count, birth_time)
         lunar_jd_final = lunar_jieduan.split("/")[-1] if lunar_jieduan else ""
+    lunar_formula = format_stage_calculation(
+        lunar_parsed, part_count, birth_time, lunar_jieduan
+    ) if lunar_parsed else ""
 
     st.markdown(f"##### 📊 目前階段：{stage_name}（{age}歲｜{stage_range}）")
 
     col_solar, col_lunar = st.columns(2)
     with col_solar:
         if jieduan:
-            st.markdown(f"**🌞 國曆階段數：** `{jd_final}`　（完整計算：{jieduan}）")
+            st.markdown(f"**🌞 國曆階段數：** `{jd_final}`　（{solar_formula}）")
         else:
             st.warning("目前階段需要出生時間（HH:MM）才能計算國曆階段數。")
     with col_lunar:
         if lunar_jieduan:
-            st.markdown(f"**🌙 農曆階段數：** `{lunar_jd_final}`　（完整計算：{lunar_jieduan}）")
+            st.markdown(f"**🌙 農曆階段數：** `{lunar_jd_final}`　（{lunar_formula}）")
         elif lunar_parsed:
             st.warning("目前階段需要出生時間（HH:MM）才能計算農曆階段數。")
         else:
@@ -203,11 +225,11 @@ def render_numerology_table(bday_str, lunar_bday_str="", birth_time="", key_pref
             "流年計算": f"{yr}年 + {bm}月 + {bd}日 → {ln}",
             "流年數": ln_final,
             "目前階段": stage_name,
-            "國曆階段數計算": jieduan or "缺少出生時間",
+            "國曆階段數計算": solar_formula,
             "國曆階段數": jd_final or "—",
         }
         if lunar_parsed:
-            row_data["農曆階段數計算"] = lunar_jieduan or "缺少出生時間"
+            row_data["農曆階段數計算"] = lunar_formula
             row_data["農曆階段數"] = lunar_jd_final or "—"
         rows.append(row_data)
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
