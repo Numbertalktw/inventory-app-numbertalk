@@ -10,7 +10,7 @@ import time
 # ==========================================
 PAGE_TITLE = "numbertalk 雲端庫存系統"
 SPREADSHEET_NAME = "numbertalk-system"
-APP_VERSION = "2026-07-23 股東分紅紀錄版 v15"
+APP_VERSION = "2026-07-23 每月股東分紅版 v16"
 
 WAREHOUSES = ["Wen", "千畇", "James", "Imeng"]
 CATEGORIES = ["天然石", "金屬配件", "線材", "包裝材料", "完成品", "數字珠", "數字串", "香料", "手作設備"]
@@ -1134,7 +1134,7 @@ ACCT_EXPENSE_CATEGORIES = [
 _OI_HEADER = ["id", "date", "category", "source", "amount", "note", "created_by", "created_at"]
 _OE_HEADER = ["id", "date", "category", "description", "amount", "note", "created_by", "created_at"]
 _SD_HEADER = [
-    "id", "resolution_date", "payment_date", "fiscal_year",
+    "id", "profit_month", "resolution_date", "payment_date",
     "shareholder_name", "amount", "payment_method", "status",
     "note", "created_by", "created_at"
 ]
@@ -1199,6 +1199,10 @@ def _add_entry(sheet_name, header, row_data):
     entry_id = str(uuid.uuid4())[:8]
     created_at = dt.datetime.now().isoformat()
     full_row = [entry_id] + row_data + [created_at]
+    # 依實際表頭排列資料，兼容舊版工作表欄位順序與後續新增欄位。
+    row_by_column = dict(zip(header, full_row))
+    actual_header = ws.row_values(1)
+    full_row = [row_by_column.get(col, "") for col in actual_header]
     import time as _t
     for _retry in range(3):
         try:
@@ -1249,7 +1253,7 @@ def delete_other_expense(entry_id):
 
 # ── 股東分紅／盈餘分配 ──
 def load_shareholder_distributions(year_month=None):
-    """載入股東分紅；月份以發放日為準，未發放者則以決議日為準。"""
+    """載入每月股東分紅，舊資料則以付款／決議日期推算所屬月份。"""
     df = load_data("ShareholderDistributions")
     if df.empty:
         return pd.DataFrame(columns=_SD_HEADER)
@@ -1258,19 +1262,21 @@ def load_shareholder_distributions(year_month=None):
             df[col] = ""
     df['amount'] = pd.to_numeric(df['amount'], errors='coerce').fillna(0)
     if year_month:
-        effective_date = df['payment_date'].astype(str).where(
-            df['payment_date'].astype(str).str.strip() != "",
-            df['resolution_date'].astype(str)
+        inferred_month = df['payment_date'].astype(str).where(
+            df['payment_date'].astype(str).str.strip() != "", df['resolution_date'].astype(str)
         )
-        df = df[effective_date.str.startswith(year_month)]
+        recorded_month = df['profit_month'].astype(str).where(
+            df['profit_month'].astype(str).str.strip() != "", inferred_month.str[:7]
+        )
+        df = df[recorded_month == year_month]
     return df
 
-def add_shareholder_distribution(resolution_date, payment_date, fiscal_year,
+def add_shareholder_distribution(profit_month, resolution_date, payment_date,
                                  shareholder_name, amount, payment_method,
                                  status, note="", created_by=""):
     return _add_entry(
         "ShareholderDistributions", _SD_HEADER,
-        [resolution_date, payment_date, str(fiscal_year), shareholder_name,
+        [profit_month, resolution_date, payment_date, shareholder_name,
          float(amount), payment_method, status, note, created_by]
     )
 
@@ -2426,7 +2432,9 @@ def _render_profit_report():
     paid_distributions = df_distributions[
         df_distributions['status'].astype(str) == "已發放"
     ] if not df_distributions.empty else pd.DataFrame(columns=_SD_HEADER)
-    distribution_total = float(paid_distributions['amount'].sum()) if not paid_distributions.empty else 0.0
+    distribution_total = float(df_distributions['amount'].sum()) if not df_distributions.empty else 0.0
+    paid_distribution_total = float(paid_distributions['amount'].sum()) if not paid_distributions.empty else 0.0
+    pending_distribution_total = distribution_total - paid_distribution_total
 
     # ── 7. 計算 ──
     combined_revenue = total_revenue + other_income_total
@@ -2450,9 +2458,10 @@ def _render_profit_report():
                delta=f"淨利率 {margin_pct:.1f}%" if combined_revenue > 0 else "無收入")
     if distribution_total > 0:
         dm1, dm2 = st.columns(2)
-        dm1.metric("🤝 已發放股東分紅", f"${distribution_total:,.0f}",
+        dm1.metric("🤝 當月決議分紅", f"${distribution_total:,.0f}",
                    help="屬盈餘分配，不計入營業費用")
-        dm2.metric("🏦 分紅後保留盈餘", f"${retained_after_distribution:,.0f}")
+        dm2.metric("🏦 分紅後保留盈餘", f"${retained_after_distribution:,.0f}",
+                   delta=f"待發放 ${pending_distribution_total:,.0f}" if pending_distribution_total > 0 else "已全數發放")
 
     st.markdown("---")
     st.markdown("##### 📋 損益明細")
@@ -2696,16 +2705,13 @@ def _render_profit_report():
 
     # ── tab: 股東分紅／盈餘分配 ──
     with bd6:
-        st.info("股東分紅屬於盈餘分配，不會列入營業支出或降低本期淨利。")
-        st.markdown("##### ➕ 新增股東分紅紀錄")
+        st.info(f"目前記錄 **{profit_ym}** 的每月分紅。股東分紅屬盈餘分配，不列入營業支出。")
+        st.markdown("##### ➕ 新增每月股東分紅")
         with st.form("add_shareholder_distribution_form", clear_on_submit=True):
             sd1, sd2, sd3 = st.columns(3)
-            sd_resolution = sd1.date_input("決議日期", value=date.today(), key="sd_resolution")
-            sd_status = sd2.selectbox("狀態", DIVIDEND_STATUSES, key="sd_status")
-            sd_fiscal_year = sd3.number_input(
-                "盈餘所屬年度", min_value=2000, max_value=date.today().year,
-                value=max(2000, date.today().year - 1), step=1, key="sd_fiscal_year"
-            )
+            sd1.text_input("分紅所屬月份", value=profit_ym, disabled=True, key="sd_profit_month")
+            sd_resolution = sd2.date_input("決議日期", value=date.today(), key="sd_resolution")
+            sd_status = sd3.selectbox("狀態", DIVIDEND_STATUSES, key="sd_status")
             sd4, sd5, sd6 = st.columns(3)
             sd_shareholder = sd4.text_input("股東姓名", key="sd_shareholder")
             sd_amount = sd5.number_input("分紅金額", min_value=0.0, step=1000.0, key="sd_amount")
@@ -2719,11 +2725,13 @@ def _render_profit_report():
                     st.error("請輸入股東姓名")
                 elif sd_amount <= 0:
                     st.error("分紅金額必須大於 0")
+                elif distribution_total + sd_amount > max(net_profit, 0):
+                    st.error(f"本月累計分紅不可超過本月淨利 ${max(net_profit, 0):,.0f}")
                 else:
                     payment_date = sd_payment.strftime("%Y-%m-%d") if sd_status == "已發放" else ""
                     ok = add_shareholder_distribution(
-                        sd_resolution.strftime("%Y-%m-%d"), payment_date,
-                        int(sd_fiscal_year), sd_shareholder.strip(), sd_amount,
+                        profit_ym, sd_resolution.strftime("%Y-%m-%d"), payment_date,
+                        sd_shareholder.strip(), sd_amount,
                         sd_method, sd_status, sd_note.strip(),
                         st.session_state.get('current_user', '')
                     )
@@ -2743,7 +2751,7 @@ def _render_profit_report():
                 sd_id = str(sd_row.get('id', ''))
                 cols = st.columns([2, 2, 2, 2, 2, 1])
                 cols[0].write(f"**{sd_row.get('shareholder_name', '')}**")
-                cols[1].write(f"{sd_row.get('fiscal_year', '')}年度")
+                cols[1].write(f"{sd_row.get('profit_month', profit_ym)} 月")
                 cols[2].write(f"${float(sd_row.get('amount', 0)):,.0f}")
                 cols[3].write(str(sd_row.get('status', '')))
                 paid_on = str(sd_row.get('payment_date', '')).strip()
