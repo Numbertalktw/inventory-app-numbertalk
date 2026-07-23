@@ -10,7 +10,7 @@ import time
 # ==========================================
 PAGE_TITLE = "numbertalk 雲端庫存系統"
 SPREADSHEET_NAME = "numbertalk-system"
-APP_VERSION = "2026-07-15 商品載入修正版 v13"
+APP_VERSION = "2026-07-23 股東分紅紀錄版 v15"
 
 WAREHOUSES = ["Wen", "千畇", "James", "Imeng"]
 CATEGORIES = ["天然石", "金屬配件", "線材", "包裝材料", "完成品", "數字珠", "數字串", "香料", "手作設備"]
@@ -57,12 +57,71 @@ def calc_liunian(year, birth_month, birth_day):
     chain = _reduce_chain(total)
     return "/".join(str(x) for x in chain)
 
-def calc_jieduan(birth_year, birth_month):
-    """階段數 = 出生年所有數字 + 生日月，縮減"""
-    digits_str = str(birth_year) + str(birth_month)
+def calc_jieduan(birth_year, birth_month=None, birth_day=None,
+                  birth_hour=None, birth_minute=None):
+    """依指定階段累加出生年、月、日、時、分的所有數字並縮減。"""
+    parts = [birth_year, birth_month, birth_day, birth_hour, birth_minute]
+    digits_str = "".join(str(part) for part in parts if part is not None)
     total = sum(int(d) for d in digits_str)
     chain = _reduce_chain(total)
     return "/".join(str(x) for x in chain)
+
+def parse_birth_time(time_str):
+    """解析出生時間 HH:MM；未填或格式錯誤時回傳 None。"""
+    if not time_str or not str(time_str).strip():
+        return None
+    try:
+        parsed = datetime.strptime(str(time_str).strip(), "%H:%M")
+        return parsed.hour, parsed.minute
+    except ValueError:
+        return None
+
+def current_age(birth_year, birth_month, birth_day, today=None):
+    """以生日是否已過計算目前實歲。"""
+    if today is None:
+        today = datetime.now().date()
+    return today.year - birth_year - (
+        (today.month, today.day) < (birth_month, birth_day)
+    )
+
+def current_stage(age):
+    """依實歲回傳階段名稱，以及計算時應使用到第幾個出生欄位。"""
+    if age >= 61:
+        return "老年階段", "61歲以上", 1
+    if age >= 41:
+        return "中年階段", "41～60歲", 2
+    if age >= 21:
+        return "青年階段", "21～40歲", 3
+    if age >= 11:
+        return "少年階段", "11～20歲", 4
+    if age == 10:
+        return "幼年轉少年階段", "目前10歲，滿11歲後進入少年階段", 5
+    return "幼年階段", "0～10歲", 5
+
+def calc_current_stage_number(birthday, stage_part_count, birth_time=None):
+    """依目前階段取出生資料前 N 欄，回傳完整縮減過程。"""
+    year, month, day = birthday
+    parsed_time = parse_birth_time(birth_time)
+    hour, minute = parsed_time if parsed_time else (None, None)
+    parts = [year, month, day, hour, minute][:stage_part_count]
+    if any(part is None for part in parts):
+        return None
+    return calc_jieduan(*parts)
+
+def format_stage_calculation(birthday, stage_part_count, birth_time, result):
+    """顯示階段數所使用的完整出生欄位與縮減結果。"""
+    if not result:
+        return "缺少出生時間"
+    year, month, day = birthday
+    parsed_time = parse_birth_time(birth_time)
+    hour, minute = parsed_time if parsed_time else (None, None)
+    values = [year, month, day, hour, minute][:stage_part_count]
+    units = ["年", "月", "日", "時", "分"][:stage_part_count]
+    formatted = []
+    for index, (value, unit) in enumerate(zip(values, units)):
+        text = str(value) if index == 0 else f"{value:02d}"
+        formatted.append(f"{text}{unit}")
+    return " + ".join(formatted) + f" → {result}"
 
 def personal_year_range(birth_month, birth_day, today=None):
     """依生日是否已過決定三個年份"""
@@ -101,45 +160,59 @@ def format_phone(phone_val):
         return '0' + digits
     return s
 
-def render_numerology_table(bday_str, lunar_bday_str="", key_prefix=""):
-    """參考 IF Crystal 格式：顯示三年流年 x 階段數對照表（國曆 + 農曆並排）"""
+def render_numerology_table(bday_str, lunar_bday_str="", birth_time="", key_prefix=""):
+    """依目前實歲顯示國／農曆五大階段數及三年流年對照表。"""
     parsed = parse_birthday(bday_str)
     if not parsed:
-        # 如果只有農曆生日，用農曆生日來計算
         lunar_only = parse_birthday(lunar_bday_str) if lunar_bday_str else None
         if not lunar_only:
             st.info("請輸入生日（格式: YYYY/MM/DD）以顯示數字能量")
             return False
-        # 只有農曆 → 只顯示農曆階段數
-        ly, lm, ld = lunar_only
-        lunar_jieduan = calc_jieduan(ly, lm)
-        lunar_jd_final = lunar_jieduan.split("/")[-1]
-        st.markdown("##### 📊 流年 × 階段數 三年對照表")
-        st.markdown(f"**🌙 農曆階段數：** `{lunar_jd_final}`　（{ly}年 + {lm}月 → {lunar_jieduan}）")
-        st.markdown("*（未填國曆生日，僅顯示農曆階段數）*")
+        age = current_age(*lunar_only)
+        stage_name, stage_range, part_count = current_stage(age)
+        lunar_jieduan = calc_current_stage_number(lunar_only, part_count, birth_time)
+        lunar_formula = format_stage_calculation(
+            lunar_only, part_count, birth_time, lunar_jieduan
+        )
+        st.markdown(f"##### 📊 目前階段：{stage_name}（{age}歲｜{stage_range}）")
+        if lunar_jieduan:
+            st.markdown(f"**🌙 農曆階段數：** `{lunar_jieduan.split('/')[-1]}`　（{lunar_formula}）")
+        else:
+            st.warning("目前階段需要出生時間（HH:MM）才能計算農曆階段數。")
+        st.caption("未填國曆生日，目前年齡暫以農曆生日估算。")
         return True
     by, bm, bd = parsed
+    age = current_age(by, bm, bd)
+    stage_name, stage_range, part_count = current_stage(age)
     years = personal_year_range(bm, bd)
     labels = ["去年", "今年", "明年"]
-    jieduan = calc_jieduan(by, bm)
-    jd_final = jieduan.split("/")[-1]
+    jieduan = calc_current_stage_number(parsed, part_count, birth_time)
+    jd_final = jieduan.split("/")[-1] if jieduan else ""
+    solar_formula = format_stage_calculation(parsed, part_count, birth_time, jieduan)
 
     lunar_parsed = parse_birthday(lunar_bday_str) if lunar_bday_str else None
     lunar_jd_final = ""
     lunar_jieduan = ""
     if lunar_parsed:
-        ly, lm, ld = lunar_parsed
-        lunar_jieduan = calc_jieduan(ly, lm)
-        lunar_jd_final = lunar_jieduan.split("/")[-1]
+        lunar_jieduan = calc_current_stage_number(lunar_parsed, part_count, birth_time)
+        lunar_jd_final = lunar_jieduan.split("/")[-1] if lunar_jieduan else ""
+    lunar_formula = format_stage_calculation(
+        lunar_parsed, part_count, birth_time, lunar_jieduan
+    ) if lunar_parsed else ""
 
-    st.markdown("##### 📊 流年 × 階段數 三年對照表")
+    st.markdown(f"##### 📊 目前階段：{stage_name}（{age}歲｜{stage_range}）")
 
     col_solar, col_lunar = st.columns(2)
     with col_solar:
-        st.markdown(f"**🌞 國曆階段數：** `{jd_final}`　（{by}年 + {bm}月 → {jieduan}）")
+        if jieduan:
+            st.markdown(f"**🌞 國曆階段數：** `{jd_final}`　（{solar_formula}）")
+        else:
+            st.warning("目前階段需要出生時間（HH:MM）才能計算國曆階段數。")
     with col_lunar:
-        if lunar_parsed:
-            st.markdown(f"**🌙 農曆階段數：** `{lunar_jd_final}`　（{ly}年 + {lm}月 → {lunar_jieduan}）")
+        if lunar_jieduan:
+            st.markdown(f"**🌙 農曆階段數：** `{lunar_jd_final}`　（{lunar_formula}）")
+        elif lunar_parsed:
+            st.warning("目前階段需要出生時間（HH:MM）才能計算農曆階段數。")
         else:
             st.markdown("**🌙 農曆階段數：** *未填寫農曆生日*")
 
@@ -151,12 +224,13 @@ def render_numerology_table(bday_str, lunar_bday_str="", key_prefix=""):
             "年份": f"{yr}（{lbl}）",
             "流年計算": f"{yr}年 + {bm}月 + {bd}日 → {ln}",
             "流年數": ln_final,
-            "國曆階段數計算": f"{by}年 + {bm}月 → {jieduan}",
-            "國曆階段數": jd_final,
+            "目前階段": stage_name,
+            "國曆階段數計算": solar_formula,
+            "國曆階段數": jd_final or "—",
         }
         if lunar_parsed:
-            row_data["農曆階段數計算"] = f"{ly}年 + {lm}月 → {lunar_jieduan}"
-            row_data["農曆階段數"] = lunar_jd_final
+            row_data["農曆階段數計算"] = lunar_formula
+            row_data["農曆階段數"] = lunar_jd_final or "—"
         rows.append(row_data)
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
     return True
@@ -1059,9 +1133,16 @@ ACCT_EXPENSE_CATEGORIES = [
 # ── OtherIncome / OtherExpense 共用 ──────────────────
 _OI_HEADER = ["id", "date", "category", "source", "amount", "note", "created_by", "created_at"]
 _OE_HEADER = ["id", "date", "category", "description", "amount", "note", "created_by", "created_at"]
+_SD_HEADER = [
+    "id", "resolution_date", "payment_date", "fiscal_year",
+    "shareholder_name", "amount", "payment_method", "status",
+    "note", "created_by", "created_at"
+]
+DIVIDEND_PAYMENT_METHODS = ["銀行轉帳", "現金", "支票", "其他"]
+DIVIDEND_STATUSES = ["已決議未發放", "已發放"]
 
 def _ensure_sheet(sheet_name, header):
-    """確保工作表存在，不存在則自動建立"""
+    """確保工作表存在，並將舊版欄位安全升級到目前格式。"""
     client = get_fresh_client()
     if not client:
         return None
@@ -1071,6 +1152,27 @@ def _ensure_sheet(sheet_name, header):
     except Exception:
         ws = sh.add_worksheet(title=sheet_name, rows=200, cols=len(header) + 2)
         ws.update('A1', [header], value_input_option='RAW')
+        return ws
+
+    current_header = ws.row_values(1)
+    if not current_header:
+        ws.update('A1', [header], value_input_option='RAW')
+        return ws
+
+    # 舊版 OtherIncome 沒有 category；插入欄位而非直接改表頭，避免舊資料錯位。
+    if sheet_name == "OtherIncome" and "category" not in current_header:
+        ws.insert_cols([["category"]], col=3, value_input_option='RAW')
+        current_header.insert(2, "category")
+
+    # 其餘新增欄位接在資料尾端，保留既有資料的位置。
+    missing = [col for col in header if col not in current_header]
+    if missing:
+        required_cols = len(current_header) + len(missing)
+        if ws.col_count < required_cols:
+            ws.resize(cols=required_cols + 2)
+        for col_name in missing:
+            ws.update_cell(1, len(current_header) + 1, col_name)
+            current_header.append(col_name)
     return ws
 
 def _load_sheet(sheet_name, header, year_month=None):
@@ -1144,6 +1246,36 @@ def add_other_expense(date_str, category, description, amount, note="", created_
 
 def delete_other_expense(entry_id):
     return _delete_entry("OtherExpense", entry_id)
+
+# ── 股東分紅／盈餘分配 ──
+def load_shareholder_distributions(year_month=None):
+    """載入股東分紅；月份以發放日為準，未發放者則以決議日為準。"""
+    df = load_data("ShareholderDistributions")
+    if df.empty:
+        return pd.DataFrame(columns=_SD_HEADER)
+    for col in _SD_HEADER:
+        if col not in df.columns:
+            df[col] = ""
+    df['amount'] = pd.to_numeric(df['amount'], errors='coerce').fillna(0)
+    if year_month:
+        effective_date = df['payment_date'].astype(str).where(
+            df['payment_date'].astype(str).str.strip() != "",
+            df['resolution_date'].astype(str)
+        )
+        df = df[effective_date.str.startswith(year_month)]
+    return df
+
+def add_shareholder_distribution(resolution_date, payment_date, fiscal_year,
+                                 shareholder_name, amount, payment_method,
+                                 status, note="", created_by=""):
+    return _add_entry(
+        "ShareholderDistributions", _SD_HEADER,
+        [resolution_date, payment_date, str(fiscal_year), shareholder_name,
+         float(amount), payment_method, status, note, created_by]
+    )
+
+def delete_shareholder_distribution(entry_id):
+    return _delete_entry("ShareholderDistributions", entry_id)
 
 
 def generate_order_no():
@@ -1861,27 +1993,6 @@ def load_wage_settlements():
         return {}
     return dict(zip(df['year_month'].astype(str), df['settled_at'].astype(str)))
 
-WAGE_PAID = "Y"
-WAGE_PREPAID = "PREPAID"
-
-def _wage_payment_code(employee_name, paid_value=""):
-    """回傳工資付款代碼；小幫手工資保留為成本，但一律視為預付已結清。"""
-    if str(employee_name).strip() == "小幫手":
-        return WAGE_PREPAID
-    code = str(paid_value).strip().upper()
-    return code if code in (WAGE_PAID, WAGE_PREPAID) else ""
-
-def _wage_payment_label(employee_name, paid_value=""):
-    code = _wage_payment_code(employee_name, paid_value)
-    if code == WAGE_PREPAID:
-        return "預付已結清"
-    if code == WAGE_PAID:
-        return "本期已支付"
-    return "未支付"
-
-def _wage_is_settled(employee_name, paid_value=""):
-    return _wage_payment_code(employee_name, paid_value) in (WAGE_PAID, WAGE_PREPAID)
-
 def add_wage_entry(date_str, employee_name, category, stage, item, qty, price, amount, note, created_by=""):
     import uuid, datetime as dt
     entry_id = str(uuid.uuid4())[:8]
@@ -1892,11 +2003,7 @@ def add_wage_entry(date_str, employee_name, category, stage, item, qty, price, a
     import time as _t
     for _retry in range(3):
         try:
-            payment_code = WAGE_PREPAID if str(employee_name).strip() == "小幫手" else ""
-            entry_note = str(note or "")
-            if payment_code == WAGE_PREPAID and "預付已結清" not in entry_note:
-                entry_note = f"{entry_note}｜小幫手工資預付已結清，本筆僅列入訂單成本，不列入本期應付".strip("｜")
-            ws.append_row([entry_id, date_str, employee_name, category, stage or "", item, qty or "", price or "", amount, entry_note, created_by, created_at, payment_code])
+            ws.append_row([entry_id, date_str, employee_name, category, stage or "", item, qty or "", price or "", amount, note, created_by, created_at, ""])
             break
         except Exception as _e:
             if '429' in str(_e) and _retry < 2:
@@ -2314,11 +2421,19 @@ def _render_profit_report():
     df_other_expense = load_other_expense(profit_ym)
     other_expense_total = float(df_other_expense['amount'].sum()) if not df_other_expense.empty else 0.0
 
-    # ── 6. 計算 ──
+    # ── 6. 股東分紅（盈餘分配，不列入費用）──
+    df_distributions = load_shareholder_distributions(profit_ym)
+    paid_distributions = df_distributions[
+        df_distributions['status'].astype(str) == "已發放"
+    ] if not df_distributions.empty else pd.DataFrame(columns=_SD_HEADER)
+    distribution_total = float(paid_distributions['amount'].sum()) if not paid_distributions.empty else 0.0
+
+    # ── 7. 計算 ──
     combined_revenue = total_revenue + other_income_total
     total_cost = purchase_cost + wage_total + other_expense_total
     gross_profit = combined_revenue - purchase_cost
     net_profit = combined_revenue - total_cost
+    retained_after_distribution = net_profit - distribution_total
     margin_pct = (net_profit / combined_revenue * 100) if combined_revenue > 0 else 0
 
     # ── 顯示 ──
@@ -2333,6 +2448,11 @@ def _render_profit_report():
     km4.metric("🔶 其他支出", f"${other_expense_total:,.0f}")
     km5.metric("📈 淨利", f"${net_profit:,.0f}",
                delta=f"淨利率 {margin_pct:.1f}%" if combined_revenue > 0 else "無收入")
+    if distribution_total > 0:
+        dm1, dm2 = st.columns(2)
+        dm1.metric("🤝 已發放股東分紅", f"${distribution_total:,.0f}",
+                   help="屬盈餘分配，不計入營業費用")
+        dm2.metric("🏦 分紅後保留盈餘", f"${retained_after_distribution:,.0f}")
 
     st.markdown("---")
     st.markdown("##### 📋 損益明細")
@@ -2366,6 +2486,9 @@ def _render_profit_report():
         pnl_rows.append({"項目": "──── 其他支出小計 ────", "金額": f"**-${other_expense_total:,.0f}**"})
     pnl_rows.append({"項目": "════ 總支出 ════", "金額": f"**-${total_cost:,.0f}**"})
     pnl_rows.append({"項目": "══ 淨利 ══", "金額": f"**${net_profit:,.0f}**"})
+    if distribution_total > 0:
+        pnl_rows.append({"項目": "🤝 股東分紅（盈餘分配，非費用）", "金額": f"-${distribution_total:,.0f}"})
+        pnl_rows.append({"項目": "══ 分紅後保留盈餘 ══", "金額": f"**${retained_after_distribution:,.0f}**"})
 
     pnl_md = "| 項目 | 金額 |\n|------|------:|\n"
     for r in pnl_rows:
@@ -2374,8 +2497,9 @@ def _render_profit_report():
 
     # ── 詳細分類 ──
     st.markdown("---")
-    bd1, bd2, bd3, bd4, bd5 = st.tabs([
-        "📦 訂單明細", "🟡 其他收入", "🔶 其他支出", "👷 工資明細", "📥 進貨明細"
+    bd1, bd2, bd3, bd4, bd5, bd6 = st.tabs([
+        "📦 訂單明細", "🟡 其他收入", "🔶 其他支出", "👷 工資明細",
+        "📥 進貨明細", "🤝 股東分紅"
     ])
 
     # ── tab: 訂單明細 ──
@@ -2570,6 +2694,64 @@ def _render_profit_report():
             st.dataframe(df_purchase_month[p_cols].rename(columns=p_rename),
                          use_container_width=True, hide_index=True)
 
+    # ── tab: 股東分紅／盈餘分配 ──
+    with bd6:
+        st.info("股東分紅屬於盈餘分配，不會列入營業支出或降低本期淨利。")
+        st.markdown("##### ➕ 新增股東分紅紀錄")
+        with st.form("add_shareholder_distribution_form", clear_on_submit=True):
+            sd1, sd2, sd3 = st.columns(3)
+            sd_resolution = sd1.date_input("決議日期", value=date.today(), key="sd_resolution")
+            sd_status = sd2.selectbox("狀態", DIVIDEND_STATUSES, key="sd_status")
+            sd_fiscal_year = sd3.number_input(
+                "盈餘所屬年度", min_value=2000, max_value=date.today().year,
+                value=max(2000, date.today().year - 1), step=1, key="sd_fiscal_year"
+            )
+            sd4, sd5, sd6 = st.columns(3)
+            sd_shareholder = sd4.text_input("股東姓名", key="sd_shareholder")
+            sd_amount = sd5.number_input("分紅金額", min_value=0.0, step=1000.0, key="sd_amount")
+            sd_method = sd6.selectbox("付款方式", DIVIDEND_PAYMENT_METHODS, key="sd_method")
+            sd7, sd8 = st.columns(2)
+            sd_payment = sd7.date_input("發放日期", value=date.today(), key="sd_payment")
+            sd_note = sd8.text_input("備註", placeholder="例：2025年度盈餘分配", key="sd_note")
+            sd_submit = st.form_submit_button("💾 新增分紅紀錄", use_container_width=True)
+            if sd_submit:
+                if not sd_shareholder.strip():
+                    st.error("請輸入股東姓名")
+                elif sd_amount <= 0:
+                    st.error("分紅金額必須大於 0")
+                else:
+                    payment_date = sd_payment.strftime("%Y-%m-%d") if sd_status == "已發放" else ""
+                    ok = add_shareholder_distribution(
+                        sd_resolution.strftime("%Y-%m-%d"), payment_date,
+                        int(sd_fiscal_year), sd_shareholder.strip(), sd_amount,
+                        sd_method, sd_status, sd_note.strip(),
+                        st.session_state.get('current_user', '')
+                    )
+                    if ok:
+                        st.success("股東分紅紀錄已新增")
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error("新增失敗，請稍後再試")
+
+        st.markdown("---")
+        st.markdown(f"##### 📋 {profit_ym} 股東分紅紀錄")
+        if df_distributions.empty:
+            st.info(f"{profit_ym} 沒有股東分紅紀錄")
+        else:
+            for _, sd_row in df_distributions.iterrows():
+                sd_id = str(sd_row.get('id', ''))
+                cols = st.columns([2, 2, 2, 2, 2, 1])
+                cols[0].write(f"**{sd_row.get('shareholder_name', '')}**")
+                cols[1].write(f"{sd_row.get('fiscal_year', '')}年度")
+                cols[2].write(f"${float(sd_row.get('amount', 0)):,.0f}")
+                cols[3].write(str(sd_row.get('status', '')))
+                paid_on = str(sd_row.get('payment_date', '')).strip()
+                cols[4].write(paid_on or f"決議 {sd_row.get('resolution_date', '')}")
+                if cols[5].button("🗑️", key=f"del_sd_{sd_id}", help="刪除此筆"):
+                    delete_shareholder_distribution(sd_id)
+                    st.rerun()
+
     # ── 匯出 CSV ──
     st.markdown("---")
     export_rows = [
@@ -2584,6 +2766,8 @@ def _render_profit_report():
         {"項目": "其他支出", "金額": -other_expense_total},
         {"項目": "總支出", "金額": -total_cost},
         {"項目": "淨利", "金額": net_profit},
+        {"項目": "股東分紅（盈餘分配）", "金額": -distribution_total},
+        {"項目": "分紅後保留盈餘", "金額": retained_after_distribution},
     ]
     export_data = pd.DataFrame(export_rows)
     st.download_button("⬇️ 匯出損益表 CSV",
@@ -2591,10 +2775,35 @@ def _render_profit_report():
                        f"損益表_{profit_ym}.csv", "text/csv")
 
 
+def _render_profit_gate():
+    """收益表共用密碼入口，供側邊選單與舊報表入口使用。"""
+    expected_pwd = REPORT_PASSWORD
+    try:
+        expected_pwd = st.secrets.get("report_password", REPORT_PASSWORD)
+    except Exception:
+        pass
+
+    if not st.session_state.get('_profit_unlocked'):
+        st.markdown("#### 🔒 此收益表需要密碼才能查看")
+        pwd_col1, pwd_col2 = st.columns([2, 1])
+        pwd_input = pwd_col1.text_input(
+            "請輸入密碼", type="password", key="profit_pwd_input"
+        )
+        if pwd_col2.button("解鎖", key="profit_unlock_btn", type="primary"):
+            if pwd_input == expected_pwd:
+                st.session_state['_profit_unlocked'] = True
+                st.rerun()
+            else:
+                st.error("密碼錯誤，請重試")
+
+    if st.session_state.get('_profit_unlocked'):
+        _render_profit_report()
+
+
 with st.sidebar:
     st.header("功能選單")
     st.caption(f"版本：{APP_VERSION}")
-    page = st.radio("前往", ["🛒 訂單管理", "👥 會員管理", "🔨 製造作業", "🚚 出貨作業", "📦 商品管理", "📥 進貨作業", "📦 移庫作業", "📊 報表查詢", "💰 工資管理"])
+    page = st.radio("前往", ["🛒 訂單管理", "👥 會員管理", "🔨 製造作業", "🚚 出貨作業", "📦 商品管理", "📥 進貨作業", "📦 移庫作業", "📈 收益表", "📊 報表查詢", "💰 工資管理"])
     if st.button("刷新資料"):
         clear_cache()
         st.rerun()
@@ -2977,7 +3186,7 @@ elif page == "🛒 訂單管理":
         o_lunar_bday = bd2.text_input("🌙 農曆生日 (YYYY/MM/DD)", key="o_lbday")
         o_birth_time = bd3.text_input("🕐 出生時間 (HH:MM)", key="o_btime")
         if o_birthday or o_lunar_bday:
-            render_numerology_table(o_birthday, o_lunar_bday, key_prefix="new_order")
+            render_numerology_table(o_birthday, o_lunar_bday, o_birth_time, key_prefix="new_order")
         o_note = st.text_input("訂單備註", key="o_note")
         o_user = st.selectbox("建立人", ["James", "Imeng", "小幫手"], key="o_user")
 
@@ -3110,7 +3319,7 @@ elif page == "🛒 訂單管理":
                             st.write(f"{bd_txt}  {lb_txt}  {bt_txt}".strip())
                         if o_bday or o_lbday:
                             with st.container():
-                                render_numerology_table(o_bday, o_lbday, key_prefix=f"{kp}_{ono}")
+                                render_numerology_table(o_bday, o_lbday, o_btime, key_prefix=f"{kp}_{ono}")
                         r_disc = float(row.get('discount', 0))
                         r_ship = float(row.get('shipping_fee', 0))
                         r_items = float(row.get('items_total', 0))
@@ -3211,12 +3420,9 @@ elif page == "🛒 訂單管理":
                         if not _existing_wage.empty:
                             st.markdown("---")
                             st.markdown(f"##### 💰 工資紀錄（{len(_existing_wage)} 筆）")
-                            _ew_disp = _existing_wage.copy()
-                            _ew_disp['payment_status'] = _ew_disp.apply(
-                                lambda r: _wage_payment_label(r.get('employee_name', ''), r.get('paid', '')), axis=1)
-                            _ew_cols = [c for c in ['stage', 'employee_name', 'item', 'amount', 'payment_status'] if c in _ew_disp.columns]
-                            _ew_disp = _ew_disp[_ew_cols].rename(
-                                columns={'stage': '階段', 'employee_name': '負責人', 'item': '品項', 'amount': '訂單工資成本', 'payment_status': '支付狀態'})
+                            _ew_cols = [c for c in ['stage', 'employee_name', 'item', 'amount', 'paid'] if c in _existing_wage.columns]
+                            _ew_disp = _existing_wage[_ew_cols].rename(
+                                columns={'stage': '階段', 'employee_name': '負責人', 'item': '品項', 'amount': '金額', 'paid': '已發'})
                             st.dataframe(_ew_disp, use_container_width=True, hide_index=True)
 
                         # === 下拉式狀態選單 ===
@@ -3353,7 +3559,7 @@ elif page == "🛒 訂單管理":
                     st.write("　".join(bd_parts))
                 if det_bday or det_lbday:
                     st.markdown(f"#### 🔢 數字能量")
-                    render_numerology_table(det_bday, det_lbday, key_prefix="detail")
+                    render_numerology_table(det_bday, det_lbday, det_btime, key_prefix="detail")
 
                 # === 訂單品項列表 ===
                 st.markdown("---")
@@ -3523,7 +3729,7 @@ elif page == "👥 會員管理":
                         st.markdown("#### 🔢 數字能量")
                         if m_btime:
                             st.write(f"🕐 出生時間: {m_btime}")
-                        render_numerology_table(m_bday, m_lbday, key_prefix="member")
+                        render_numerology_table(m_bday, m_lbday, m_btime, key_prefix="member")
                     with st.form("edit_member"):
                         em_phone = st.text_input("電話", value=str(m_data.get('phone', '')))
                         em_email = st.text_input("Email", value=str(m_data.get('email', '')))
@@ -3909,6 +4115,12 @@ elif page == "🔨 製造作業":
                     st.success("OK"); time.sleep(1); st.rerun()
     render_history_table(["製造領料", "製造入庫"])
 
+# --- 📈 收益表 ---
+elif page == "📈 收益表":
+    st.subheader("📈 收益表")
+    st.caption("彙整訂單收入、進貨成本、工資，以及自行登錄的其他收入與支出。")
+    _render_profit_gate()
+
 # --- 📊 報表查詢 ---
 elif page == "📊 報表查詢":
     st.subheader("📊 報表查詢")
@@ -3927,26 +4139,7 @@ elif page == "📊 報表查詢":
             render_batch_stock_table()
 
     with tab_profit:
-        # ── 密碼驗證 ──
-        _expected_pwd = REPORT_PASSWORD
-        try:
-            _expected_pwd = st.secrets.get("report_password", REPORT_PASSWORD)
-        except Exception:
-            pass
-
-        if not st.session_state.get('_profit_unlocked'):
-            st.markdown("#### 🔒 此報表需要密碼才能查看")
-            _pwd_col1, _pwd_col2 = st.columns([2, 1])
-            _pwd_input = _pwd_col1.text_input("請輸入密碼", type="password", key="profit_pwd_input")
-            if _pwd_col2.button("解鎖", key="profit_unlock_btn", type="primary"):
-                if _pwd_input == _expected_pwd:
-                    st.session_state['_profit_unlocked'] = True
-                    st.rerun()
-                else:
-                    st.error("密碼錯誤，請重試")
-
-        if st.session_state.get('_profit_unlocked'):
-            _render_profit_report()
+        _render_profit_gate()
 
 # --- 💰 工資管理 ---
 elif page == "💰 工資管理":
@@ -4042,8 +4235,8 @@ elif page == "💰 工資管理":
                 ec3.text(f"{cat_txt}{' · ' + stg_txt if stg_txt else ''}")
                 ec4.text(str(er.get('item', '')))
                 ec5.text(f"${float(er.get('amount', 0)):,.0f}")
-                _pay_label = _wage_payment_label(er.get('employee_name', ''), er.get('paid', ''))
-                ec6.markdown("🔵" if _pay_label == "預付已結清" else ("✅" if _pay_label == "本期已支付" else "⏳"))
+                _is_p = str(er.get('paid', '')).upper() == 'Y'
+                ec6.markdown("✅" if _is_p else "⏳")
                 if ec7.button("🗑️", key=f"wage_del_{w_idx}_{er.get('id', '')}"):
                     if delete_wage_entry(str(er.get('id', ''))):
                         st.success("已刪除")
@@ -4051,12 +4244,10 @@ elif page == "💰 工資管理":
                         st.rerun()
             st.divider()
             # 匯出 CSV
-            df_this['payment_status'] = df_this.apply(
-                lambda r: _wage_payment_label(r.get('employee_name', ''), r.get('paid', '')), axis=1)
-            csv_cols = ['date', 'employee_name', 'category', 'stage', 'item', 'qty', 'price', 'amount', 'payment_status', 'note']
+            csv_cols = ['date', 'employee_name', 'category', 'stage', 'item', 'qty', 'price', 'amount', 'note']
             csv_rename = {'date': '日期', 'employee_name': '員工', 'category': '類別',
                           'stage': '階段', 'item': '項目', 'qty': '數量',
-                          'price': '單價', 'amount': '訂單工資成本', 'payment_status': '支付狀態', 'note': '備註'}
+                          'price': '單價', 'amount': '金額', 'note': '備註'}
             exist_cols = [c for c in csv_cols if c in df_this.columns]
             csv_data = df_this[exist_cols].rename(columns=csv_rename)
             st.download_button("⬇️ 匯出本月 CSV", csv_data.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig'),
@@ -4099,18 +4290,13 @@ elif page == "💰 工資管理":
         if df_rpt.empty:
             st.info(f"**{rpt_ym}** 尚無工資紀錄")
         else:
-            df_rpt['_payment_code'] = df_rpt.apply(
-                lambda r: _wage_payment_code(r.get('employee_name', ''), r.get('paid', '')), axis=1)
             grand_total = df_rpt['amount'].sum()
-            paid_total = df_rpt[df_rpt['_payment_code'] == WAGE_PAID]['amount'].sum()
-            prepaid_total = df_rpt[df_rpt['_payment_code'] == WAGE_PREPAID]['amount'].sum()
-            unpaid_total = df_rpt[df_rpt['_payment_code'] == '']['amount'].sum()
-            rc1, rc2, rc3, rc4 = st.columns(4)
-            rc1.metric("工資成本合計", f"NT$ {grand_total:,.0f}")
-            rc2.metric("本期已支付", f"NT$ {paid_total:,.0f}")
-            rc3.metric("預付已結清", f"NT$ {prepaid_total:,.0f}")
-            rc4.metric("本期尚需支付", f"NT$ {unpaid_total:,.0f}")
-            st.caption("小幫手工資仍計入訂單成本；因已事先結清，不會列入本期尚需支付。")
+            paid_total = df_rpt[df_rpt['paid'].astype(str).str.upper() == 'Y']['amount'].sum()
+            unpaid_total = grand_total - paid_total
+            rc1, rc2, rc3 = st.columns(3)
+            rc1.metric("合計", f"NT$ {grand_total:,.0f}")
+            rc2.metric("已發放", f"NT$ {paid_total:,.0f}")
+            rc3.metric("未發放", f"NT$ {unpaid_total:,.0f}")
 
             # 確保必要欄位存在
             for _col in ['employee_name', 'amount', 'category', 'stage', 'id']:
@@ -4120,11 +4306,9 @@ elif page == "💰 工資管理":
             # 按員工分組
             for emp_name, grp in df_rpt.groupby('employee_name'):
                 emp_total = grp['amount'].sum()
-                emp_unpaid = grp[grp['_payment_code'] == '']['amount'].sum()
-                if str(emp_name).strip() == "小幫手":
-                    paid_badge = "🔵 預付已結清｜本期應付 NT$ 0"
-                else:
-                    paid_badge = "✅ 全部已支付" if emp_unpaid <= 0 else f"⏳ 尚需支付 NT$ {emp_unpaid:,.0f}"
+                emp_paid = grp[grp['paid'].astype(str).str.upper() == 'Y']['amount'].sum()
+                emp_unpaid = emp_total - emp_paid
+                paid_badge = "✅ 全部已發放" if emp_unpaid <= 0 else f"⏳ 未發放 NT$ {emp_unpaid:,.0f}"
                 with st.expander(f"👷 {emp_name}　NT$ {emp_total:,.0f}　{paid_badge}"):
                     grp_by_cols = [c for c in ['category', 'stage'] if c in grp.columns]
                     if grp_by_cols:
@@ -4143,13 +4327,10 @@ elif page == "💰 工資管理":
                         _wc2.text(_stg if _stg else str(_wr.get('category', '')))
                         _wc3.text(str(_wr.get('item', '')))
                         _wc4.text(f"${float(_wr.get('amount', 0)):,.0f}")
-                        _payment_code = _wage_payment_code(_wr.get('employee_name', ''), _wr.get('paid', ''))
+                        _is_paid = str(_wr.get('paid', '')).upper() == 'Y'
                         _entry_id = str(_wr.get('id', ''))
-                        if _payment_code == WAGE_PREPAID:
-                            _wc5.markdown("🔵 預付結清")
-                            _wc6.caption("應付 $0")
-                        elif _payment_code == WAGE_PAID:
-                            _wc5.markdown("✅ 已支付")
+                        if _is_paid:
+                            _wc5.markdown("✅ 已發")
                             if _wc6.button("↩️", key=f"unpay_{rpt_ym}_{_wi}_{_entry_id}", help="取消發放"):
                                 mark_wage_entry_paid(_entry_id, paid=False)
                                 st.rerun()
@@ -4159,8 +4340,7 @@ elif page == "💰 工資管理":
                                 mark_wage_entry_paid(_entry_id, paid=True)
                                 st.rerun()
                     # 一鍵發放此員工全部
-                    _emp_unpaid_ids = [str(r.get('id', '')) for _, r in grp.iterrows()
-                                       if not _wage_is_settled(r.get('employee_name', ''), r.get('paid', ''))]
+                    _emp_unpaid_ids = [str(r.get('id', '')) for _, r in grp.iterrows() if str(r.get('paid', '')).upper() != 'Y']
                     if _emp_unpaid_ids:
                         if st.button(f"💰 全部標記已發放（{emp_name}）", key=f"payall_{rpt_ym}_{emp_name}", use_container_width=True):
                             for _eid in _emp_unpaid_ids:
@@ -4168,12 +4348,10 @@ elif page == "💰 工資管理":
                             st.rerun()
 
             st.divider()
-            df_rpt['payment_status'] = df_rpt.apply(
-                lambda r: _wage_payment_label(r.get('employee_name', ''), r.get('paid', '')), axis=1)
-            rpt_cols = ['date', 'employee_name', 'category', 'stage', 'item', 'qty', 'price', 'amount', 'payment_status', 'note']
+            rpt_cols = ['date', 'employee_name', 'category', 'stage', 'item', 'qty', 'price', 'amount', 'paid', 'note']
             rpt_rename = {'date': '日期', 'employee_name': '員工', 'category': '類別',
                           'stage': '階段', 'item': '項目', 'qty': '數量',
-                          'price': '單價', 'amount': '訂單工資成本', 'payment_status': '支付狀態', 'note': '備註'}
+                          'price': '單價', 'amount': '金額', 'paid': '已發放', 'note': '備註'}
             exist_rpt_cols = [c for c in rpt_cols if c in df_rpt.columns]
             csv_rpt = df_rpt[exist_rpt_cols].rename(columns=rpt_rename)
             st.download_button("⬇️ 匯出報表 CSV", csv_rpt.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig'),
