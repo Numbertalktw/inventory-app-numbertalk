@@ -10,7 +10,7 @@ import time
 # ==========================================
 PAGE_TITLE = "numbertalk 雲端庫存系統"
 SPREADSHEET_NAME = "numbertalk-system"
-APP_VERSION = "2026-07-23 每月股東分紅版 v16"
+APP_VERSION = "2026-07-23 股東選單與備註版 v17"
 
 WAREHOUSES = ["Wen", "千畇", "James", "Imeng"]
 CATEGORIES = ["天然石", "金屬配件", "線材", "包裝材料", "完成品", "數字珠", "數字串", "香料", "手作設備"]
@@ -2393,6 +2393,13 @@ def _render_profit_report():
 
     # ── 6. 股東分紅（盈餘分配，不列入費用）──
     df_distributions = load_shareholder_distributions(profit_ym)
+    df_all_distributions = load_shareholder_distributions()
+    shareholder_options = []
+    if not df_all_distributions.empty and 'shareholder_name' in df_all_distributions.columns:
+        shareholder_options = sorted({
+            str(name).strip() for name in df_all_distributions['shareholder_name']
+            if str(name).strip() and str(name).strip().lower() != 'nan'
+        })
     paid_distributions = df_distributions[
         df_distributions['status'].astype(str) == "已發放"
     ] if not df_distributions.empty else pd.DataFrame(columns=_SD_HEADER)
@@ -2681,7 +2688,11 @@ def _render_profit_report():
             sd_resolution = sd2.date_input("決議日期", value=date.today(), key="sd_resolution")
             sd_status = sd3.selectbox("狀態", DIVIDEND_STATUSES, key="sd_status")
             sd4, sd5, sd6 = st.columns(3)
-            sd_shareholder = sd4.text_input("股東姓名", key="sd_shareholder")
+            sd_shareholder = sd4.selectbox(
+                "股東姓名", shareholder_options, index=None,
+                placeholder="選擇或輸入新股東", accept_new_options=True,
+                key="sd_shareholder"
+            )
             sd_amount = sd5.number_input("分紅金額", min_value=0.0, step=1000.0, key="sd_amount")
             sd_method = sd6.selectbox("付款方式", DIVIDEND_PAYMENT_METHODS, key="sd_method")
             sd7, sd8 = st.columns(2)
@@ -2689,7 +2700,8 @@ def _render_profit_report():
             sd_note = sd8.text_input("備註", placeholder="例：2025年度盈餘分配", key="sd_note")
             sd_submit = st.form_submit_button("💾 新增分紅紀錄", use_container_width=True)
             if sd_submit:
-                if not sd_shareholder.strip():
+                shareholder_name = str(sd_shareholder or "").strip()
+                if not shareholder_name:
                     st.error("請輸入股東姓名")
                 elif sd_amount <= 0:
                     st.error("分紅金額必須大於 0")
@@ -2699,7 +2711,7 @@ def _render_profit_report():
                     payment_date = sd_payment.strftime("%Y-%m-%d") if sd_status == "已發放" else ""
                     ok = add_shareholder_distribution(
                         profit_ym, sd_resolution.strftime("%Y-%m-%d"), payment_date,
-                        sd_shareholder.strip(), sd_amount,
+                        shareholder_name, sd_amount,
                         sd_method, sd_status, sd_note.strip(),
                         st.session_state.get('current_user', '')
                     )
@@ -2717,14 +2729,16 @@ def _render_profit_report():
         else:
             for _, sd_row in df_distributions.iterrows():
                 sd_id = str(sd_row.get('id', ''))
-                cols = st.columns([2, 2, 2, 2, 2, 1])
+                cols = st.columns([2, 1.6, 1.6, 1.6, 2, 3, 0.8])
                 cols[0].write(f"**{sd_row.get('shareholder_name', '')}**")
                 cols[1].write(f"{sd_row.get('profit_month', profit_ym)} 月")
                 cols[2].write(f"${float(sd_row.get('amount', 0)):,.0f}")
                 cols[3].write(str(sd_row.get('status', '')))
                 paid_on = str(sd_row.get('payment_date', '')).strip()
                 cols[4].write(paid_on or f"決議 {sd_row.get('resolution_date', '')}")
-                if cols[5].button("🗑️", key=f"del_sd_{sd_id}", help="刪除此筆"):
+                note_text = str(sd_row.get('note', '')).strip()
+                cols[5].write(f"📝 {note_text}" if note_text else "—")
+                if cols[6].button("🗑️", key=f"del_sd_{sd_id}", help="刪除此筆"):
                     if delete_shareholder_distribution(sd_id):
                         st.rerun()
                     else:
